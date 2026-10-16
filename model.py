@@ -19,7 +19,7 @@ class RidgeRegression:
     def __init__(self, alpha: float = 12.0):
         self.alpha = alpha
         self.coef_: Optional[np.ndarray] = None
-        self.intercept_: float = 0.0
+        self.intercept_: Any = 0.0
         self.mean_: Optional[np.ndarray] = None
         self.scale_: Optional[np.ndarray] = None
 
@@ -33,7 +33,7 @@ class RidgeRegression:
         self.scale_[self.scale_ == 0.0] = 1.0
 
         Z = (X - self.mean_) / self.scale_
-        y_mean = np.mean(y)
+        y_mean = np.mean(y, axis=0)
         y_centered = y - y_mean
 
         A = Z.T @ Z + self.alpha * np.eye(p)
@@ -43,7 +43,7 @@ class RidgeRegression:
         except np.linalg.LinAlgError:
             self.coef_ = np.linalg.pinv(A) @ b
 
-        self.intercept_ = float(y_mean)
+        self.intercept_ = y_mean
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
@@ -53,6 +53,7 @@ class RidgeRegression:
 
 class PerformancePredictor:
     def __init__(self):
+        self.multi_model: Optional[RidgeRegression] = None
         self.models: Dict[str, RidgeRegression] = {}
         self.trained = False
         self.baseline: Dict[str, float] = {}
@@ -144,11 +145,9 @@ class PerformancePredictor:
             self.trained = False
             return
 
-        for target in ("goals", "assists", "shots", "toi"):
-            m = RidgeRegression(alpha=15.0)
-            m.fit(X, y_dict[target])
-            self.models[target] = m
-
+        y_mat = np.column_stack([y_dict[target] for target in ("goals", "assists", "shots", "toi")])
+        self.multi_model = RidgeRegression(alpha=15.0)
+        self.multi_model.fit(X, y_mat)
         self.trained = True
 
     def predict(
@@ -207,10 +206,12 @@ class PerformancePredictor:
             ]])
 
             preds = {}
-            if self.trained:
-                for target in ("goals", "assists", "shots", "toi"):
-                    val = float(self.models[target].predict(x_vec)[0])
-                    preds[target] = max(0.0, val)
+            if self.trained and self.multi_model is not None:
+                raw_preds = self.multi_model.predict(x_vec)[0]
+                preds["goals"] = max(0.0, float(raw_preds[0]))
+                preds["assists"] = max(0.0, float(raw_preds[1]))
+                preds["shots"] = max(0.0, float(raw_preds[2]))
+                preds["toi"] = max(0.0, float(raw_preds[3]))
                 if goalie_factor != 1.0:
                     preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
                     preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))

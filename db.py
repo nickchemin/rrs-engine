@@ -14,6 +14,8 @@ class Database:
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_schema(self):
@@ -267,6 +269,33 @@ class Database:
             """, (player_id, name, team, position, now))
             conn.commit()
 
+    def save_players_batch(self, players: List[Dict[str, Any]]):
+        if not players:
+            return
+        now = time.time()
+        params = [
+            (
+                p["id"],
+                p["name"],
+                p.get("team", ""),
+                p.get("pos", p.get("position", "F")),
+                now
+            )
+            for p in players
+        ]
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.executemany("""
+                INSERT INTO players (player_id, name, team, position, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(player_id) DO UPDATE SET
+                    name=excluded.name,
+                    team=excluded.team,
+                    position=excluded.position,
+                    updated_at=excluded.updated_at
+            """, params)
+            conn.commit()
+
     def get_game_logs(self, player_id: int) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             cur = conn.cursor()
@@ -295,32 +324,43 @@ class Database:
             cur.execute("SELECT 1 FROM game_logs WHERE player_id = ? LIMIT 1", (player_id,))
             return cur.fetchone() is not None
 
-    def save_game_logs(self, player_id: int, logs: List[Dict[str, Any]]):
+    def get_latest_game_date(self, player_id: int) -> Optional[str]:
         with self._get_connection() as conn:
             cur = conn.cursor()
-            for g in logs:
-                game_id = g.get("gameId") or g.get("id")
-                toi_str = g.get("toi", "00:00")
-                parts = toi_str.split(":")
-                toi_min = float(parts[0]) + float(parts[1]) / 60.0 if len(parts) == 2 else 0.0
+            cur.execute("SELECT MAX(game_date) FROM game_logs WHERE player_id = ?", (player_id,))
+            r = cur.fetchone()
+            return r[0] if r and r[0] else None
 
-                cur.execute("""
-                    INSERT OR IGNORE INTO game_logs (
-                        player_id, game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    player_id,
-                    game_id,
-                    g.get("gameDate", "2020-01-01"),
-                    g.get("seasonId", "20242025"),
-                    1 if g.get("homeRoadFlag") == "H" else 0,
-                    g.get("opponentAbbrev", ""),
-                    float(g.get("goals", 0)),
-                    float(g.get("assists", 0)),
-                    float(g.get("shots", 0)),
-                    toi_str,
-                    toi_min
-                ))
+    def save_game_logs(self, player_id: int, logs: List[Dict[str, Any]]):
+        if not logs:
+            return
+        rows = []
+        for g in logs:
+            game_id = g.get("gameId") or g.get("id")
+            toi_str = g.get("toi", "00:00")
+            parts = toi_str.split(":")
+            toi_min = float(parts[0]) + float(parts[1]) / 60.0 if len(parts) == 2 else 0.0
+            rows.append((
+                player_id,
+                game_id,
+                g.get("gameDate", "2020-01-01"),
+                g.get("seasonId", "20242025"),
+                1 if g.get("homeRoadFlag") == "H" else 0,
+                g.get("opponentAbbrev", ""),
+                float(g.get("goals", 0)),
+                float(g.get("assists", 0)),
+                float(g.get("shots", 0)),
+                toi_str,
+                toi_min
+            ))
+
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.executemany("""
+                INSERT OR IGNORE INTO game_logs (
+                    player_id, game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
             conn.commit()
 
     # --- Boosters ---

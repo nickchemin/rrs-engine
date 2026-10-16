@@ -1,7 +1,11 @@
 import requests
 import json
 import re
+import os
 from typing import Dict, List, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 from db import Database
 
 
@@ -12,6 +16,13 @@ class NHLClient:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        adapter = HTTPAdapter(
+            pool_connections=25,
+            pool_maxsize=25,
+            max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def get_standings(self, force: bool = False) -> Dict[str, Dict[str, float]]:
         if not force:
@@ -94,10 +105,19 @@ class NHLClient:
         force: bool = False
     ) -> List[Dict[str, Any]]:
         if not force and self.db.has_game_logs(player_id):
+            # Fast check: sync newly completed games from the current season
+            try:
+                url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
+                res = self.session.get(url, timeout=6)
+                if res.status_code == 200:
+                    current_logs = res.json().get("gameLog", [])
+                    if current_logs:
+                        self.db.save_game_logs(player_id, current_logs)
+            except Exception:
+                pass
             return self.db.get_game_logs(player_id)
 
         # Check legacy .cache folder if present
-        import os, json
         cache_file = os.path.join(os.path.dirname(__file__), ".cache", f"game_logs_{player_id}.json")
         if not force and os.path.exists(cache_file):
             try:
@@ -113,17 +133,26 @@ class NHLClient:
             seasons = ["20232024", "20242025", "20252026", "20262027"]
 
         all_logs = []
-        for season in seasons:
-            url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/{season}/2"
+
+        def _fetch_season(s: str) -> List[Dict[str, Any]]:
+            url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/{s}/2"
             try:
-                res = self.session.get(url, timeout=8)
+                res = self.session.get(url, timeout=6)
                 if res.status_code == 200:
-                    data = res.json()
-                    for g in data.get("gameLog", []):
-                        g["seasonId"] = season
-                        all_logs.append(g)
+                    items = res.json().get("gameLog", [])
+                    for g in items:
+                        g["seasonId"] = s
+                    return items
             except Exception:
                 pass
+            return []
+
+        with ThreadPoolExecutor(max_workers=min(len(seasons), 4)) as executor:
+            future_to_season = {executor.submit(_fetch_season, s): s for s in seasons}
+            for future in as_completed(future_to_season):
+                logs = future.result()
+                if logs:
+                    all_logs.extend(logs)
 
         all_logs.sort(key=lambda x: x.get("gameDate", ""))
         if all_logs:
@@ -133,7 +162,7 @@ class NHLClient:
     def get_player_current_game_logs(self, player_id: int) -> List[Dict[str, Any]]:
         url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
         try:
-            res = self.session.get(url, timeout=8)
+            res = self.session.get(url, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 logs = data.get("gameLog", [])
@@ -143,6 +172,32 @@ class NHLClient:
         except Exception:
             pass
         return self.get_player_game_logs(player_id)
+
+    def get_all_club_stats(self, team_abbrevs: List[str], max_workers: int = 8) -> Dict[str, List[Dict[str, Any]]]:
+        unique_teams = list(set(team_abbrevs))
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_team = {executor.submit(self.get_club_stats, t): t for t in unique_teams}
+            for future in as_completed(future_to_team):
+                t = future_to_team[future]
+                try:
+                    results[t] = future.result()
+                except Exception:
+                    results[t] = []
+        return results
+
+    def prefetch_players_game_logs(self, player_ids: List[int], max_workers: int = 8) -> Dict[int, List[Dict[str, Any]]]:
+        unique_ids = list(set(player_ids))
+        results: Dict[int, List[Dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_id = {executor.submit(self.get_player_game_logs, pid): pid for pid in unique_ids}
+            for future in as_completed(future_to_id):
+                pid = future_to_id[future]
+                try:
+                    results[pid] = future.result()
+                except Exception:
+                    results[pid] = []
+        return results
 
     def get_club_stats(self, team_abbrev: str) -> List[Dict[str, Any]]:
         url = f"https://api-web.nhle.com/v1/club-stats/{team_abbrev}/now"

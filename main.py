@@ -1,8 +1,9 @@
 import os
 import sys
 import argparse
+import itertools
 from datetime import datetime
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from db import Database
 from nhl_api import NHLClient
@@ -163,8 +164,12 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
     dtd_players = []
     excluded_count = 0
 
+    print("Fetching club rosters and stats in parallel...")
+    all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
+
+    players_to_save = []
     for team, (opp, is_home) in team_matchups.items():
-        skaters = client.get_club_stats(team)
+        skaters = all_club_stats.get(team, [])
         opp_goalie = goalies.get(opp, {})
         g_factor = opp_goalie.get("goalie_factor", 1.0)
         g_name = opp_goalie.get("goalie_name", "")
@@ -176,7 +181,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
             gp = p.get("gamesPlayed", 0)
             avg_toi = p.get("avgTimeOnIcePerGame", 0.0) / 60.0
 
-            db.save_player(p_id, full_name, team, pos)
+            players_to_save.append({"id": p_id, "name": full_name, "team": team, "pos": pos})
 
             g_pg = ((p.get("goals", 0) / gp) * g_factor) if gp else 0.0
             a_pg = ((p.get("assists", 0) / gp) * (1.0 + 0.5 * (g_factor - 1.0))) if gp else 0.0
@@ -222,6 +227,9 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
                 "avg_toi": avg_toi,
                 "booster": b_val
             })
+
+    if players_to_save:
+        db.save_players_batch(players_to_save)
 
     candidates.sort(key=lambda x: x["xRRS"], reverse=True)
     dtd_players.sort(key=lambda x: x["name"])
@@ -275,8 +283,24 @@ def assign_slots(players: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], f
 def solve_optimal_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
     if not candidates:
         return [], 0.0
-    ranked = sorted(candidates, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x["booster"]), reverse=True)
-    return assign_slots(ranked[:5])
+    if len(candidates) <= 5:
+        return assign_slots(candidates)
+
+    # Evaluate top 25 candidates by potential upper-bound EV (maximum slot multiplier 2.0x + booster)
+    pool = sorted(candidates, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (2.0 + x.get("booster", 0.0)), reverse=True)[:25]
+
+    best_lineup: Optional[List[Dict[str, Any]]] = None
+    best_score = -1.0
+
+    for comb in itertools.combinations(pool, 5):
+        assigned, score = assign_slots(list(comb))
+        if score > best_score:
+            best_score = score
+            best_lineup = assigned
+
+    if best_lineup is not None:
+        return best_lineup, best_score
+    return assign_slots(pool[:5])
 
 
 def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float, float]:
@@ -616,8 +640,14 @@ def main():
     dtd_skipped = 0
     candidates = []
 
+    print("Fetching club rosters and stats in parallel...")
+    all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
+
+    qualifying_skaters = []
+    players_to_save = []
+
     for team, (opp, is_home) in team_matchups.items():
-        skaters = client.get_club_stats(team)
+        skaters = all_club_stats.get(team, [])
         opp_goalie = goalies.get(opp, {})
         g_factor = opp_goalie.get("goalie_factor", 1.0)
         g_name = opp_goalie.get("goalie_name", "")
@@ -629,7 +659,7 @@ def main():
             gp = p.get("gamesPlayed", 0)
             avg_toi = p.get("avgTimeOnIcePerGame", 0.0) / 60.0
 
-            db.save_player(p_id, full_name, team, pos)
+            players_to_save.append({"id": p_id, "name": full_name, "team": team, "pos": pos})
             b_val = boosters.get(full_name, 0.0)
 
             # Injury check
@@ -647,38 +677,69 @@ def main():
             if b_val == 0.0 and (gp < 1 or avg_toi < 14.5):
                 continue
 
-            logs = client.get_player_game_logs(p_id)
-            if not logs:
-                continue
-
-            predictor = PerformancePredictor()
-            predictor.train(logs, standings)
-            pred = predictor.predict(
-                game_logs=logs,
-                is_home=is_home,
-                opponent_abbrev=opp,
-                game_date=game_date,
-                standings=standings,
-                position=pos,
-                goalie_factor=g_factor
-            )
-
-            candidates.append({
+            qualifying_skaters.append({
                 "id": p_id,
                 "name": full_name,
                 "team": team,
-                "opp": f"{'vs' if is_home else '@'}{opp}",
+                "opp": opp,
+                "is_home": is_home,
                 "opp_goalie": g_name,
+                "goalie_factor": g_factor,
                 "pos": pos,
-                "xRRS": pred["xRRS"],
-                "base_pts": pred["base_pts"],
                 "booster": b_val
             })
+
+    if players_to_save:
+        db.save_players_batch(players_to_save)
 
     if excluded_injuries > 0 or dtd_skipped > 0:
         print(f"Injuries: excluded {excluded_injuries} Out/IR players, skipped {dtd_skipped} Day-To-Day players without booster.")
     if goalies:
         print(f"Goalies: matched {len(goalies)} starting goalies for today's games.")
+
+    # Prefetch game logs in parallel for all qualifying skaters
+    print(f"Synchronizing game logs for {len(qualifying_skaters)} qualifying skaters (in parallel)...")
+    qualifying_ids = [s["id"] for s in qualifying_skaters]
+    logs_map = client.prefetch_players_game_logs(qualifying_ids, max_workers=8)
+
+    total_qual = len(qualifying_skaters)
+    for idx, s in enumerate(qualifying_skaters, 1):
+        p_id = s["id"]
+        logs = logs_map.get(p_id) or []
+        if not logs:
+            continue
+
+        if idx % 5 == 0 or idx == total_qual:
+            sys.stdout.write(f"\rTraining ML models & projecting xRRS: [{idx}/{total_qual}]...")
+            sys.stdout.flush()
+
+        predictor = PerformancePredictor()
+        predictor.train(logs, standings)
+        pred = predictor.predict(
+            game_logs=logs,
+            is_home=s["is_home"],
+            opponent_abbrev=s["opp"],
+            game_date=game_date,
+            standings=standings,
+            position=s["pos"],
+            goalie_factor=s["goalie_factor"]
+        )
+
+        candidates.append({
+            "id": p_id,
+            "name": s["name"],
+            "team": s["team"],
+            "opp": f"{'vs' if s['is_home'] else '@'}{s['opp']}",
+            "opp_goalie": s["opp_goalie"],
+            "pos": s["pos"],
+            "xRRS": pred["xRRS"],
+            "base_pts": pred["base_pts"],
+            "booster": s["booster"]
+        })
+
+    if total_qual > 0:
+        sys.stdout.write(f"\rTraining ML models & projecting xRRS: completed for {len(candidates)} active skaters.      \n")
+        sys.stdout.flush()
 
     # 4. Solve optimal 5-slot lineup(s)
     if args.stack:
