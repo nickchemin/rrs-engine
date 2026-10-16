@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local SQLite Database (auto-generated on first run)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data.db
+
+# Cache & Temporary data
+.cache/
+*.log
+
+# Personal local boosters file (use boosters.example.txt as template)
+boosters.txt
+
+# Environment & Credentials
+.env
+.venv/
+venv/
+ENV/
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

@@ -1,0 +1,21 @@
+# ==============================================================================
+# RRS Engine — Real Sports Boosters Configuration Template
+# ==============================================================================
+# Format: Player Name = Booster Value
+# Supported booster formats: 0.8, +0.8x, +80%, 80
+# 
+# How it works:
+#   1. Copy this file to `boosters.txt` (or run `python main.py --sync` to auto-fetch today's roster).
+#   2. Check your Real Sports mobile app and update the booster multiplier for your players.
+#   3. Run `python main.py` to generate the optimal lineup!
+# ==============================================================================
+
+Nathan MacKinnon         = 0.0
+Leon Draisaitl           = 0.2
+Matt Boldy               = 0.8
+Quinn Hughes             = 0.4
+Mitch Marner             = 0.8
+Brock Boeser             = 3.0
+Shea Theodore            = 2.6
+Darren Raddysh           = 1.9
+Zach Hyman               = 2.8
