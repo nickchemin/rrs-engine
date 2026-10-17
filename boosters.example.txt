@@ -14,12 +14,24 @@
 #   3. Run `python main.py` to generate the optimal lineup!
 # ==============================================================================
 
-Nathan MacKinnon         = 0.0
-Leon Draisaitl           = 0.2
-Matt Boldy               = 0.8
-Quinn Hughes             = 0.4
-Mitch Marner             = 0.8
-Brock Boeser             = 3.0
-Shea Theodore            = 2.6
-Darren Raddysh           = 1.9
-Zach Hyman               = 2.8
+# ==============================================================================
+# COL — Colorado Avalanche
+# ==============================================================================
+Nathan MacKinnon         = 0.0  # COL C
+Cale Makar               = 0.4  # COL D
+Artturi Lehkonen         = 0.6  # COL F
+
+# ==============================================================================
+# EDM — Edmonton Oilers
+# ==============================================================================
+Connor McDavid           = 0.0  # EDM C
+Leon Draisaitl           = 0.2  # EDM C
+Zach Hyman               = 2.8  # EDM F
+
+# ==============================================================================
+# VAN — Vancouver Canucks
+# ==============================================================================
+Elias Pettersson (C)     = 1.4  # VAN C (#40)
+Quinn Hughes             = 0.4  # VAN D
+Brock Boeser             = 3.0  # VAN F
+Elias Pettersson (D)     = 0.0  # VAN D (#25)

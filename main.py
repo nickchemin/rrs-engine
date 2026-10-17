@@ -112,6 +112,18 @@ def get_player_booster(
     return boosters.get(name, 0.0)
 
 
+NHL_TEAM_NAMES = {
+    "ANA": "Anaheim Ducks", "BOS": "Boston Bruins", "BUF": "Buffalo Sabres", "CGY": "Calgary Flames",
+    "CAR": "Carolina Hurricanes", "CHI": "Chicago Blackhawks", "COL": "Colorado Avalanche", "CBJ": "Columbus Blue Jackets",
+    "DAL": "Dallas Stars", "DET": "Detroit Red Wings", "EDM": "Edmonton Oilers", "FLA": "Florida Panthers",
+    "LAK": "Los Angeles Kings", "MIN": "Minnesota Wild", "MTL": "Montreal Canadiens", "NSH": "Nashville Predators",
+    "NJD": "New Jersey Devils", "NYI": "New York Islanders", "NYR": "New York Rangers", "OTT": "Ottawa Senators",
+    "PHI": "Philadelphia Flyers", "PIT": "Pittsburgh Penguins", "SJS": "San Jose Sharks", "SEA": "Seattle Kraken",
+    "STL": "St. Louis Blues", "TBL": "Tampa Bay Lightning", "TOR": "Toronto Maple Leafs", "UTA": "Utah Hockey Club",
+    "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights", "WSH": "Washington Capitals", "WPG": "Winnipeg Jets"
+}
+
+
 def save_boosters_file(
     boosters: Dict[str, float],
     active_players: List[Dict[str, Any]],
@@ -121,6 +133,7 @@ def save_boosters_file(
     lines = [
         "# Real Sports NHL - Player Boosters",
         "# Format: Player Name = Booster (e.g. Matt Boldy = 0.8)",
+        "# Note: Partitioned by team for fast post-game lookup.",
         "# Note: For duplicate names, specify position: Elias Pettersson (C) = 1.4 vs Elias Pettersson (D) = 0.0",
         "# Default booster is 0.0x if player is not listed.",
         ""
@@ -129,45 +142,56 @@ def save_boosters_file(
     all_skaters = list(active_players) + list(dtd_players or [])
     name_counts = Counter(p["name"] for p in all_skaters)
 
+    all_teams = sorted(list(set(p.get("team", "") for p in all_skaters if p.get("team"))))
     written_keys = set()
 
-    # 1. Active healthy players playing today
-    for p in active_players:
-        name = p["name"]
-        pos = p.get("pos", "")
-        team = p.get("team", "")
-        is_dup = name_counts[name] > 1
-        key = f"{name} ({pos})" if is_dup else name
-        comment = f"  # {team} {pos}" if is_dup else ""
+    for team in all_teams:
+        team_name = NHL_TEAM_NAMES.get(team, team)
+        lines.append(f"# {'=' * 78}")
+        lines.append(f"# {team} — {team_name}")
+        lines.append(f"# {'=' * 78}")
 
-        if key in written_keys:
-            continue
-        written_keys.add(key)
+        # 1. Active healthy players on this team (sorted by projected xRRS descending)
+        team_active = [p for p in active_players if p.get("team") == team]
+        team_active.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)), reverse=True)
 
-        b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
-        lines.append(f"{key:<24} = {b_val:.1f}{comment}")
-
-    # 2. Day-to-day players (commented out by default)
-    if dtd_players:
-        lines.append("")
-        lines.append("# Day-To-Day players (uncomment if confirmed playing):")
-        for p in dtd_players:
+        for p in team_active:
             name = p["name"]
             pos = p.get("pos", "")
-            team = p.get("team", "")
             is_dup = name_counts[name] > 1
             key = f"{name} ({pos})" if is_dup else name
-            detail = p.get("inj_detail") or "Day-To-Day"
+            comment = f"  # {team} {pos}" if is_dup else ""
 
             if key in written_keys:
                 continue
             written_keys.add(key)
 
             b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
-            lines.append(f"# [DTD] {key:<20} = {b_val:.1f}  # {team} {pos} {detail}")
+            lines.append(f"{key:<24} = {b_val:.1f}{comment}")
+
+        # 2. Day-To-Day players on this team (commented out)
+        if dtd_players:
+            team_dtd = [p for p in dtd_players if p.get("team") == team]
+            team_dtd.sort(key=lambda x: x["name"])
+
+            for p in team_dtd:
+                name = p["name"]
+                pos = p.get("pos", "")
+                is_dup = name_counts[name] > 1
+                key = f"{name} ({pos})" if is_dup else name
+                detail = p.get("inj_detail") or "Day-To-Day"
+
+                if key in written_keys:
+                    continue
+                written_keys.add(key)
+
+                b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
+                lines.append(f"# [DTD] {key:<20} = {b_val:.1f}  # {team} {pos} {detail}")
+
+        lines.append("")
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(lines).rstrip() + "\n")
 
 
 def sync_boosters_to_db(db: Database, boosters: Dict[str, float]):
