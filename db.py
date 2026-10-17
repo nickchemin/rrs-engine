@@ -1,9 +1,23 @@
 import sqlite3
 import os
 import time
+from contextlib import contextmanager
 from typing import Dict, List, Any, Optional
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+
+
+def season_from_date(game_date: str) -> str:
+    try:
+        parts = game_date.split("-")
+        year = int(parts[0])
+        month = int(parts[1])
+        if month >= 8:
+            return f"{year}{year+1}"
+        else:
+            return f"{year-1}{year}"
+    except Exception:
+        return "20242025"
 
 
 class Database:
@@ -11,12 +25,20 @@ class Database:
         self.db_path = db_path
         self._init_schema()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    @contextmanager
+    def _get_connection(self):
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self):
         with self._get_connection() as conn:
@@ -300,13 +322,14 @@ class Database:
         with self._get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
+                SELECT game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
                 FROM game_logs
                 WHERE player_id = ?
                 ORDER BY game_date ASC
             """, (player_id,))
             rows = cur.fetchall()
             return [{
+                "gameId": r["game_id"],
                 "gameDate": r["game_date"],
                 "seasonId": r["season"],
                 "homeRoadFlag": "H" if r["is_home"] else "R",
@@ -337,14 +360,25 @@ class Database:
         rows = []
         for g in logs:
             game_id = g.get("gameId") or g.get("id")
-            toi_str = g.get("toi", "00:00")
-            parts = toi_str.split(":")
-            toi_min = float(parts[0]) + float(parts[1]) / 60.0 if len(parts) == 2 else 0.0
+            game_date = g.get("gameDate")
+            # Skip invalid records without gameId or date (prevents NULL integrity issues)
+            if not game_id or not game_date:
+                continue
+
+            toi_str = str(g.get("toi") or "00:00")
+            try:
+                parts = toi_str.split(":")
+                toi_min = float(parts[0]) + float(parts[1]) / 60.0 if len(parts) == 2 else float(toi_str)
+            except Exception:
+                toi_min = 0.0
+
+            season_id = str(g.get("seasonId") or season_from_date(game_date))
+
             rows.append((
                 player_id,
                 game_id,
-                g.get("gameDate", "2020-01-01"),
-                g.get("seasonId", "20242025"),
+                game_date,
+                season_id,
                 1 if g.get("homeRoadFlag") == "H" else 0,
                 g.get("opponentAbbrev", ""),
                 float(g.get("goals", 0)),
@@ -353,6 +387,9 @@ class Database:
                 toi_str,
                 toi_min
             ))
+
+        if not rows:
+            return
 
         with self._get_connection() as conn:
             cur = conn.cursor()
@@ -381,6 +418,14 @@ class Database:
                     booster=excluded.booster,
                     updated_at=excluded.updated_at
             """, (player_name, booster, now))
+            conn.commit()
+
+    def delete_boosters(self, player_names: List[str]):
+        if not player_names:
+            return
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.executemany("DELETE FROM boosters WHERE player_name = ?", [(n,) for n in player_names])
             conn.commit()
 
     # --- Injuries ---
@@ -433,7 +478,7 @@ class Database:
                     "status": r["status"],
                     "detail": r["detail"] or ""
                 }
-        return None
+            return None
 
     # --- Goalies ---
     def get_starting_goalies(self, max_age_hours: float = 4.0) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -479,26 +524,19 @@ class Database:
 
     # --- Lineup History & Tracking ---
     def save_lineup_history(self, game_date: str, mode: str, lineup: List[Dict[str, Any]]):
+        if not lineup:
+            return
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
+            cur.execute("DELETE FROM lineup_history WHERE game_date = ? AND mode = ?", (game_date, mode))
             for item in lineup:
                 cur.execute("""
                     INSERT INTO lineup_history (
                         game_date, mode, slot, slot_boost, player_id, player_name,
                         team, opponent, booster, total_boost, proj_xrrs, proj_rrs,
-                        calibrated, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                    ON CONFLICT(game_date, mode, slot) DO UPDATE SET
-                        player_id=excluded.player_id,
-                        player_name=excluded.player_name,
-                        team=excluded.team,
-                        opponent=excluded.opponent,
-                        booster=excluded.booster,
-                        total_boost=excluded.total_boost,
-                        proj_xrrs=excluded.proj_xrrs,
-                        proj_rrs=excluded.proj_rrs,
-                        calibrated=1
+                        calibrated, settled, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
                 """, (
                     game_date,
                     mode,
@@ -563,6 +601,9 @@ class Database:
                     COUNT(*) as players_count,
                     SUM(proj_rrs) as total_proj_rrs,
                     SUM(CASE WHEN settled = 1 THEN actual_rrs ELSE 0 END) as total_actual_rrs,
+                    AVG(proj_rrs) as avg_proj_rrs,
+                    AVG(CASE WHEN settled = 1 THEN actual_rrs ELSE NULL END) as avg_actual_rrs,
+                    AVG(CASE WHEN settled = 1 THEN (actual_rrs - proj_rrs) ELSE NULL END) as avg_bias_rrs,
                     MIN(settled) as all_settled
                 FROM lineup_history
                 GROUP BY game_date, mode

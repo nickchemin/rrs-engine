@@ -1,13 +1,17 @@
-﻿# RRS Engine
+# RRS Engine
 
-Quantitative draft optimizer and sports analytics terminal for NHL contests on the **Real Sports** app. Built with Ridge Regression machine learning, starting goalie matchup tracking, and correlated teammate stacking.
+Quantitative draft optimizer and sports analytics terminal for NHL contests on the **Real Sports** app. Built with Ridge Regression machine learning, exact dynamic programming lineup optimization, starting goalie matchup tracking, and correlated teammate stacking.
 
 ## Features
 
 - **xRRS Calculation**: Predicts player performance based on historical stats, opponent defense metrics, and starting goalie save percentages.
-- **Starting Goalie Intel**: Scrapes confirmed starting netminders from Daily Faceoff with official NHL API fallback.
-- **Teammate Stacks**: Solves for correlated 2-man and 2+2 combinations to maximize tournament ceiling.
-- **Automated Settlement**: Fetches completed match boxscores and calculates actual vs. projected payouts.
+- **Exact DP Optimizer**: Evaluates optimal 5-slot lineups using exact $O(5N)$ dynamic programming obeying the rearrangement inequality in $<1$ ms.
+- **Starting Goalie Intel**: Scrapes confirmed starting netminders from Daily Faceoff with slate matchup verification and official NHL API fallback.
+- **Teammate Stacks**: Solves for correlated 2-man and 2+2 combinations with synergy multipliers to maximize tournament ceiling.
+- **Automated Settlement**: Fetches completed match boxscores from NHL Gamecenter (`/boxscore`) to track actual goals, assists, shots, and blocked shots, with automatic DNP handling.
+- **Partitioned Boosters**: Formats `boosters.txt` grouped by team with automatic name deduplication (e.g., Elias Pettersson C vs. D) and diacritic-insensitive resolution.
+- **NHL Timezone Handling**: Accurately aligns slate dates using America/New_York time across European and Asian timezones.
+- **Out-of-sample ML Validation**: Tests prediction models against a 20-game rolling average baseline.
 
 ## Quickstart
 
@@ -46,6 +50,11 @@ python main.py
 chmod +x run.sh && ./run.sh
 ```
 
+### 5. Run Offline Tests
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Command Reference
 
 | Command | Description |
@@ -53,10 +62,11 @@ chmod +x run.sh && ./run.sh
 | `python main.py` | Generates standard optimal and tournament stack lineups. |
 | `python main.py --stack` | Solves exclusively for correlated teammate stacks. |
 | `python main.py --sync` | Fetches active NHL roster, starting goalies, and refreshes `boosters.txt`. |
-| `python main.py --sync --date YYYY-MM-DD` | Syncs rosters for a specific date. |
-| `python main.py --history` | Performance tracking table with cumulative profit. |
+| `python main.py --date YYYY-MM-DD` | Runs optimizer for a specific slate date. |
+| `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific date. |
+| `python main.py --history` | Performance tracking table with cumulative profit and settled status. |
 | `python main.py --history YYYY-MM-DD` | Detailed box score breakdown for a specific date. |
-| `python main.py --train` | Runs out-of-sample machine learning validation on historical games. |
+| `python main.py --train` | Runs out-of-sample machine learning validation vs. 20-game baseline. |
 
 ## License
 

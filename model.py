@@ -180,9 +180,7 @@ class PerformancePredictor:
                 rest = 2.0
 
             opp_info = standings.get(opponent_abbrev, {})
-            opp_def = opp_info.get("defense_factor", 1.0)
-            if goalie_factor != 1.0:
-                opp_def = round(opp_def * goalie_factor, 3)
+            opp_def = float(opp_info.get("defense_factor", 1.0))
 
             last5 = parsed[-5:] if len(parsed) >= 5 else parsed
             last20 = parsed[-20:] if len(parsed) >= 20 else parsed
@@ -212,9 +210,6 @@ class PerformancePredictor:
                 preds["assists"] = max(0.0, float(raw_preds[1]))
                 preds["shots"] = max(0.0, float(raw_preds[2]))
                 preds["toi"] = max(0.0, float(raw_preds[3]))
-                if goalie_factor != 1.0:
-                    preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
-                    preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
             else:
                 home_boost = 1.05 if is_home else 0.95
                 r5_g = np.mean([x["goals"] for x in last5])
@@ -225,6 +220,10 @@ class PerformancePredictor:
                 preds["assists"] = max(0.0, r5_a * opp_def * home_boost)
                 preds["shots"] = max(0.0, r5_s * opp_def * home_boost)
                 preds["toi"] = max(5.0, r5_toi)
+
+            if goalie_factor != 1.0:
+                preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
+                preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
 
         is_def = position in ("D", "DEF")
         blk_rate = 0.09 if is_def else 0.04
@@ -298,7 +297,7 @@ def calculate_rrs_from_stats(
 ) -> float:
     """
     Computes actual Real Rating based on completed match boxscore events:
-    - 0 points (only shots/blocks): 0.0 - 0.9.
+    - 0 points (only shots/blocks): 0.0 - 1.0 (shots * 0.25 + blocks * 0.50).
     - 1 Assist: ~1.0 - 1.3.
     - 1 Goal: ~2.5 - 3.5.
     - Multi-point games (2+ points): ~3.7 - 5.2.
@@ -306,7 +305,7 @@ def calculate_rrs_from_stats(
     """
     pts = goals + assists
     if pts == 0:
-        raw = shots * 0.16 + blocks * 0.45
+        raw = shots * 0.25 + blocks * 0.50
         return round(min(1.0, max(0.0, raw)), 1)
 
     base = 0.0
@@ -323,7 +322,7 @@ def calculate_rrs_from_stats(
     if pts >= 2:
         base += 0.4 * (pts - 1)
 
-    base += shots * 0.16 + blocks * 0.30
+    base += shots * 0.25 + blocks * 0.50
     return round(min(10.0, max(0.0, base)), 1)
 
 
@@ -335,6 +334,7 @@ def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: i
         return
 
     errors = {"goals": [], "assists": [], "shots": [], "toi": []}
+    base_errors = {"goals": [], "assists": [], "shots": [], "toi": []}
     tested_players = 0
 
     for p in players:
@@ -372,16 +372,29 @@ def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: i
             errors["shots"].append(abs(pred["xSOG"] - actual_s))
             errors["toi"].append(abs(pred_toi - actual_toi))
 
+            # 20-game rolling average baseline
+            last20 = history[-20:] if len(history) >= 20 else history
+            base_g = np.mean([float(x.get("goals", 0)) for x in last20])
+            base_a = np.mean([float(x.get("assists", 0)) for x in last20])
+            base_s = np.mean([float(x.get("shots", 0)) for x in last20])
+            base_toi = np.mean([parse_toi(x.get("toi", "00:00")) for x in last20])
+
+            base_errors["goals"].append(abs(base_g - actual_g))
+            base_errors["assists"].append(abs(base_a - actual_a))
+            base_errors["shots"].append(abs(base_s - actual_s))
+            base_errors["toi"].append(abs(base_toi - actual_toi))
+
         tested_players += 1
 
     if not errors["goals"]:
         print("Not enough game logs found to evaluate model.")
         return
 
-    print("-" * 48)
+    print("-" * 62)
     print(f"Validation Results ({tested_players} players, {len(errors['goals'])} test games):")
-    print(f"  Goals (MAE):    {np.mean(errors['goals']):.3f} per game")
-    print(f"  Assists (MAE):  {np.mean(errors['assists']):.3f} per game")
-    print(f"  Shots (MAE):    {np.mean(errors['shots']):.3f} per game")
-    print(f"  TOI (MAE):      {np.mean(errors['toi']):.2f} minutes")
-    print("-" * 48)
+    print(f"  Goals (MAE):    {np.mean(errors['goals']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['goals']):.3f})")
+    print(f"  Assists (MAE):  {np.mean(errors['assists']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['assists']):.3f})")
+    print(f"  Shots (MAE):    {np.mean(errors['shots']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['shots']):.3f})")
+    print(f"  TOI (MAE):      {np.mean(errors['toi']):.2f} min       (Baseline 20-game avg: {np.mean(base_errors['toi']):.2f} min)")
+    print("  * Note: Standings defense factor used for historical games reflects current standings.")
+    print("-" * 62)

@@ -2,11 +2,31 @@ import requests
 import json
 import re
 import os
+import threading
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from db import Database
+from db import Database, season_from_date
+
+
+def nhl_now() -> datetime:
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        tz = timezone(timedelta(hours=-5))
+    return datetime.now(tz)
+
+
+def nhl_today() -> str:
+    return nhl_now().strftime("%Y-%m-%d")
+
+
+def current_season_start_year() -> int:
+    now = nhl_now()
+    return now.year if now.month >= 8 else now.year - 1
 
 
 class NHLClient:
@@ -23,6 +43,8 @@ class NHLClient:
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
+        self._boxscore_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
+        self._boxscore_lock = threading.Lock()
 
     def get_standings(self, force: bool = False) -> Dict[str, Dict[str, float]]:
         if not force:
@@ -98,6 +120,24 @@ class NHLClient:
 
         return schedule
 
+    def _fetch_game_log(self, player_id: int, season: str) -> List[Dict[str, Any]]:
+        url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/{season}/2"
+        try:
+            res = self.session.get(url, timeout=6)
+            if res.status_code == 200:
+                items = res.json().get("gameLog", [])
+                valid = []
+                for g in items:
+                    if g.get("gameTypeId") == 1:
+                        continue
+                    if not g.get("seasonId"):
+                        g["seasonId"] = season or season_from_date(g.get("gameDate", ""))
+                    valid.append(g)
+                return valid
+        except Exception:
+            pass
+        return []
+
     def get_player_game_logs(
         self,
         player_id: int,
@@ -111,44 +151,57 @@ class NHLClient:
                 res = self.session.get(url, timeout=6)
                 if res.status_code == 200:
                     current_logs = res.json().get("gameLog", [])
-                    if current_logs:
-                        self.db.save_game_logs(player_id, current_logs)
+                    valid_logs = []
+                    for g in current_logs:
+                        if g.get("gameTypeId") == 1:
+                            continue
+                        if not g.get("seasonId"):
+                            g["seasonId"] = season_from_date(g.get("gameDate", ""))
+                        valid_logs.append(g)
+                    if valid_logs:
+                        self.db.save_game_logs(player_id, valid_logs)
             except Exception:
                 pass
             return self.db.get_game_logs(player_id)
 
-        # Check legacy .cache folder if present
+        # Check legacy .cache folder if present - only if DB has no logs
         cache_file = os.path.join(os.path.dirname(__file__), ".cache", f"game_logs_{player_id}.json")
-        if not force and os.path.exists(cache_file):
+        if not force and not self.db.has_game_logs(player_id) and os.path.exists(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     legacy_logs = json.load(f)
                     if legacy_logs:
-                        self.db.save_game_logs(player_id, legacy_logs)
-                        return self.db.get_game_logs(player_id)
+                        valid_legacy = []
+                        for g in legacy_logs:
+                            if g.get("gameTypeId") == 1:
+                                continue
+                            if not g.get("seasonId"):
+                                g["seasonId"] = season_from_date(g.get("gameDate", ""))
+                            valid_legacy.append(g)
+                        if valid_legacy:
+                            self.db.save_game_logs(player_id, valid_legacy)
+                            return self.db.get_game_logs(player_id)
             except Exception:
                 pass
 
         if seasons is None:
-            seasons = ["20232024", "20242025", "20252026", "20262027"]
+            curr_start = current_season_start_year()
+            candidates = [
+                f"{curr_start}{curr_start+1}",
+                f"{curr_start-1}{curr_start}",
+                f"{curr_start-2}{curr_start-1}"
+            ]
+            now = nhl_now()
+            seasons = []
+            for s in candidates:
+                s_year = int(s[:4])
+                if now.year < s_year or (now.year == s_year and now.month < 9):
+                    continue
+                seasons.append(s)
 
         all_logs = []
-
-        def _fetch_season(s: str) -> List[Dict[str, Any]]:
-            url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/{s}/2"
-            try:
-                res = self.session.get(url, timeout=6)
-                if res.status_code == 200:
-                    items = res.json().get("gameLog", [])
-                    for g in items:
-                        g["seasonId"] = s
-                    return items
-            except Exception:
-                pass
-            return []
-
-        with ThreadPoolExecutor(max_workers=min(len(seasons), 4)) as executor:
-            future_to_season = {executor.submit(_fetch_season, s): s for s in seasons}
+        with ThreadPoolExecutor(max_workers=min(max(len(seasons), 1), 4)) as executor:
+            future_to_season = {executor.submit(self._fetch_game_log, player_id, s): s for s in seasons}
             for future in as_completed(future_to_season):
                 logs = future.result()
                 if logs:
@@ -159,31 +212,63 @@ class NHLClient:
             self.db.save_game_logs(player_id, all_logs)
         return self.db.get_game_logs(player_id)
 
-    def get_player_current_game_logs(self, player_id: int) -> List[Dict[str, Any]]:
+    def get_player_current_game_logs(self, player_id: int) -> Optional[List[Dict[str, Any]]]:
         url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
         try:
             res = self.session.get(url, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 logs = data.get("gameLog", [])
-                if logs:
-                    self.db.save_game_logs(player_id, logs)
-                return logs
+                valid_logs = []
+                for g in logs:
+                    if g.get("gameTypeId") == 1:
+                        continue
+                    if not g.get("seasonId"):
+                        g["seasonId"] = season_from_date(g.get("gameDate", ""))
+                    valid_logs.append(g)
+                if valid_logs:
+                    self.db.save_game_logs(player_id, valid_logs)
+                return valid_logs
+            return None
         except Exception:
-            pass
-        return self.get_player_game_logs(player_id)
+            return None
+
+    def _fetch_team_skaters(self, team_abbrev: str) -> List[Dict[str, Any]]:
+        skaters = self.get_club_stats(team_abbrev)
+        if not skaters:
+            return []
+        roster = self.get_team_roster(team_abbrev)
+        if roster:
+            roster_ids = {p.get("id") for p in roster if p.get("id")}
+            if roster_ids:
+                skaters = [s for s in skaters if s.get("playerId") in roster_ids]
+        return skaters
 
     def get_all_club_stats(self, team_abbrevs: List[str], max_workers: int = 8) -> Dict[str, List[Dict[str, Any]]]:
-        unique_teams = list(set(team_abbrevs))
-        results: Dict[str, List[Dict[str, Any]]] = {}
+        unique_teams = list(dict.fromkeys(team_abbrevs))
+        raw_results: Dict[str, List[Dict[str, Any]]] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_team = {executor.submit(self.get_club_stats, t): t for t in unique_teams}
+            future_to_team = {executor.submit(self._fetch_team_skaters, t): t for t in unique_teams}
             for future in as_completed(future_to_team):
                 t = future_to_team[future]
                 try:
-                    results[t] = future.result()
-                except Exception:
-                    results[t] = []
+                    raw_results[t] = future.result()
+                except Exception as e:
+                    print(f"Failed to fetch team skaters for {t}: {e}")
+                    raw_results[t] = []
+
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        seen_pids = set()
+        for t in unique_teams:
+            filtered = []
+            for s in raw_results.get(t, []):
+                pid = s.get("playerId")
+                if pid:
+                    if pid in seen_pids:
+                        continue
+                    seen_pids.add(pid)
+                filtered.append(s)
+            results[t] = filtered
         return results
 
     def prefetch_players_game_logs(self, player_ids: List[int], max_workers: int = 8) -> Dict[int, List[Dict[str, Any]]]:
@@ -266,13 +351,26 @@ class NHLClient:
         games: Optional[List[Dict[str, Any]]] = None,
         force: bool = False
     ) -> Dict[str, Dict[str, Any]]:
+        slate_teams = set()
+        slate_matchups = set()
+        if games:
+            for g in games:
+                h = g.get("homeTeam")
+                a = g.get("awayTeam")
+                if h:
+                    slate_teams.add(h)
+                if a:
+                    slate_teams.add(a)
+                if h and a:
+                    slate_matchups.add((h, a))
+
         if not force:
             cached = self.db.get_starting_goalies()
             if cached:
-                # Augment cached with computed goalie_factor
-                for t, d in cached.items():
-                    d["goalie_factor"] = compute_goalie_factor(d.get("save_pct", 0.902))
-                return cached
+                if not slate_teams or slate_teams.issubset(cached.keys()):
+                    for t, d in cached.items():
+                        d["goalie_factor"] = compute_goalie_factor(d.get("save_pct", 0.902))
+                    return cached
 
         goalies: Dict[str, Dict[str, Any]] = {}
 
@@ -281,13 +379,19 @@ class NHLClient:
             url = "https://www.dailyfaceoff.com/starting-goalies"
             res = self.session.get(url, timeout=8)
             if res.status_code == 200:
-                m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', res.text)
+                m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', res.text, re.S)
                 if m:
                     data = json.loads(m.group(1))
                     df_games = data.get("props", {}).get("pageProps", {}).get("data", [])
                     for g in df_games:
                         h_slug = g.get("homeTeamSlug", "")
+                        a_slug = g.get("awayTeamSlug", "")
                         h_team = TEAM_SLUG_MAP.get(h_slug)
+                        a_team = TEAM_SLUG_MAP.get(a_slug)
+
+                        if slate_matchups and (h_team, a_team) not in slate_matchups:
+                            continue
+
                         if h_team and g.get("homeGoalieName"):
                             sv = float(g.get("homeGoalieSavePercentage") or 0.902)
                             gaa = float(g.get("homeGoalieGoalsAgainstAvg") or 3.0)
@@ -300,8 +404,6 @@ class NHLClient:
                                 "goalie_factor": compute_goalie_factor(sv)
                             }
 
-                        a_slug = g.get("awayTeamSlug", "")
-                        a_team = TEAM_SLUG_MAP.get(a_slug)
                         if a_team and g.get("awayGoalieName"):
                             sv = float(g.get("awayGoalieSavePercentage") or 0.902)
                             gaa = float(g.get("awayGoalieGoalsAgainstAvg") or 3.0)
@@ -363,6 +465,40 @@ class NHLClient:
 
         return goalies
 
+    def get_boxscore_skaters(self, game_id: int) -> Dict[int, Dict[str, Any]]:
+        with self._boxscore_lock:
+            if game_id in self._boxscore_cache:
+                return self._boxscore_cache[game_id]
+
+        url = f"https://api-web.nhle.com/v1/gamecenter/{game_id}/boxscore"
+        skaters: Dict[int, Dict[str, Any]] = {}
+        try:
+            res = self.session.get(url, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                game_state = data.get("gameState")
+                if game_state in ("OFF", "FINAL"):
+                    pstats = data.get("playerByGameStats", {})
+                    for team_key in ("homeTeam", "awayTeam"):
+                        team_data = pstats.get(team_key, {})
+                        for p in team_data.get("forwards", []) + team_data.get("defense", []):
+                            pid = p.get("playerId")
+                            if pid:
+                                skaters[pid] = {
+                                    "playerId": pid,
+                                    "goals": p.get("goals", 0) or 0,
+                                    "assists": p.get("assists", 0) or 0,
+                                    "sog": p.get("sog", 0) or 0,
+                                    "blockedShots": p.get("blockedShots", 0) or 0,
+                                    "toi": p.get("toi", "00:00") or "00:00"
+                                }
+                    with self._boxscore_lock:
+                        self._boxscore_cache[game_id] = skaters
+                    return skaters
+        except Exception as e:
+            print(f"Failed to fetch boxscore for game {game_id}: {e}")
+        return {}
+
 
 TEAM_SLUG_MAP = {
     "anaheim-ducks": "ANA", "boston-bruins": "BOS", "buffalo-sabres": "BUF", "calgary-flames": "CGY",
@@ -372,7 +508,8 @@ TEAM_SLUG_MAP = {
     "new-jersey-devils": "NJD", "new-york-islanders": "NYI", "new-york-rangers": "NYR", "ottawa-senators": "OTT",
     "philadelphia-flyers": "PHI", "pittsburgh-penguins": "PIT", "san-jose-sharks": "SJS", "seattle-kraken": "SEA",
     "st-louis-blues": "STL", "tampa-bay-lightning": "TBL", "toronto-maple-leafs": "TOR", "utah-hockey-club": "UTA",
-    "utah": "UTA", "vancouver-canucks": "VAN", "vegas-golden-knights": "VGK", "washington-capitals": "WSH", "winnipeg-jets": "WPG"
+    "utah-mammoth": "UTA", "utah": "UTA", "vancouver-canucks": "VAN", "vegas-golden-knights": "VGK",
+    "washington-capitals": "WSH", "winnipeg-jets": "WPG"
 }
 
 
@@ -385,4 +522,3 @@ def compute_goalie_factor(save_pct: float) -> float:
     # Dampen by 40% towards 1.0 for sample stability
     factor = 1.0 + 0.40 * (raw - 1.0)
     return round(max(0.85, min(1.25, factor)), 3)
-
