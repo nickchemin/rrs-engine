@@ -47,6 +47,23 @@ def parse_booster_val(val_str: str) -> float:
         return 0.0
 
 
+def normalize_booster_name(name: str) -> str:
+    """
+    Normalizes player names to consistent canonical keys:
+    - 'Elias Pettersson (C)', 'Elias Pettersson (F)', 'Elias Pettersson #40', or 'Elias Pettersson' -> 'Elias Pettersson (C)'
+    - 'Elias Pettersson (D)', 'Elias Pettersson #25' -> 'Elias Pettersson (D)'
+    """
+    raw = name.strip()
+    if raw.startswith("[DTD]"):
+        raw = raw[5:].strip()
+    lower = raw.lower()
+    if "elias pettersson" in lower:
+        if any(x in lower for x in ["(d)", "(def)", "(defense)", "#25"]):
+            return "Elias Pettersson (D)"
+        return "Elias Pettersson (C)"
+    return raw
+
+
 def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
     boosters = {}
     if not os.path.exists(path):
@@ -67,23 +84,12 @@ def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
                 parts = line.rsplit(None, 1)
 
             if len(parts) == 2:
-                name = parts[0].strip()
-                if name.startswith("[DTD]"):
-                    name = name[5:].strip()
+                raw_name = parts[0].strip()
                 val_raw = parts[1].strip().split("#")[0].strip()
                 val = parse_booster_val(val_raw)
-                if name:
-                    boosters[name] = val
-
-                    # Aliasing for duplicate/position-qualified names
-                    lower_name = name.lower()
-                    if any(x in lower_name for x in ["(c)", "(f)", "(center)", "(forward)", "#40"]):
-                        base = name.split("(")[0].split("#")[0].strip()
-                        boosters[f"{base} (C)"] = val
-                        boosters[f"{base} (F)"] = val
-                    elif any(x in lower_name for x in ["(d)", "(def)", "(defense)", "#25"]):
-                        base = name.split("(")[0].split("#")[0].strip()
-                        boosters[f"{base} (D)"] = val
+                canon_name = normalize_booster_name(raw_name)
+                if canon_name:
+                    boosters[canon_name] = val
 
     return boosters
 
@@ -96,32 +102,14 @@ def get_player_booster(
 ) -> float:
     """
     Resolves booster value with support for duplicate player names (e.g. Elias Pettersson C vs D).
-    Lookup priority:
-    1. Exact qualified key: 'Elias Pettersson (C)', 'Elias Pettersson (D)'
-    2. Forward alias if pos in ('C', 'LW', 'RW'): 'Elias Pettersson (F)'
-    3. Unqualified key 'Elias Pettersson':
-       - If is_duplicate: defaults to forward/center (C), returns 0.0 for defenseman unless qualified.
-       - If not duplicate: returns boosters[name].
-    4. Default 0.0
     """
-    if pos:
-        key_pos = f"{name} ({pos})"
-        if key_pos in boosters:
-            return boosters[key_pos]
-        if pos in ("C", "LW", "RW"):
-            key_f = f"{name} (F)"
-            if key_f in boosters:
-                return boosters[key_f]
+    if is_duplicate:
+        if pos in ("D", "DEF"):
+            return boosters.get(f"{name} (D)", 0.0)
+        else:
+            return boosters.get(f"{name} (C)", boosters.get(name, 0.0))
 
-    if name in boosters:
-        if is_duplicate:
-            # When duplicate name is unqualified, assign to forward (star player), not defenseman
-            if pos in ("C", "LW", "RW", "F"):
-                return boosters[name]
-            return 0.0
-        return boosters[name]
-
-    return 0.0
+    return boosters.get(name, 0.0)
 
 
 def save_boosters_file(
@@ -178,24 +166,21 @@ def save_boosters_file(
             b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
             lines.append(f"# [DTD] {key:<20} = {b_val:.1f}  # {team} {pos} {detail}")
 
-    # 3. Any remaining custom boosters
-    extras = []
-    for name, b_val in boosters.items():
-        if name not in written_keys and b_val > 0.0:
-            extras.append(f"{name:<24} = {b_val:.1f}")
-
-    if extras:
-        lines.append("")
-        lines.append("# Other players:")
-        lines.extend(extras)
-
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
 def sync_boosters_to_db(db: Database, boosters: Dict[str, float]):
     for name, val in boosters.items():
-        db.set_booster(name, val)
+        canon = normalize_booster_name(name)
+        db.set_booster(canon, val)
+    # Purge legacy/unqualified duplicate keys from SQLite DB
+    try:
+        with db._get_connection() as conn:
+            conn.execute("DELETE FROM boosters WHERE player_name IN ('Elias Pettersson', 'Elias Pettersson (F)')")
+            conn.commit()
+    except Exception:
+        pass
 
 
 def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force: bool = False) -> List[Dict[str, Any]]:
