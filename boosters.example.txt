@@ -4,6 +4,10 @@
 # Format: Player Name = Booster Value
 # Supported booster formats: 0.8, +0.8x, +80%, 80
 # 
+# Duplicate player names: specify position, e.g.:
+#   Elias Pettersson (C)     = 1.4  # VAN Center (#40)
+#   Elias Pettersson (D)     = 0.0  # VAN Defense (#25)
+# 
 # How it works:
 #   1. Copy this file to `boosters.txt` (or run `python main.py --sync` to auto-fetch today's roster).
 #   2. Check your Real Sports mobile app and update the booster multiplier for your players.

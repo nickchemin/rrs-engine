@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import itertools
+from collections import Counter
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -74,7 +75,53 @@ def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
                 if name:
                     boosters[name] = val
 
+                    # Aliasing for duplicate/position-qualified names
+                    lower_name = name.lower()
+                    if any(x in lower_name for x in ["(c)", "(f)", "(center)", "(forward)", "#40"]):
+                        base = name.split("(")[0].split("#")[0].strip()
+                        boosters[f"{base} (C)"] = val
+                        boosters[f"{base} (F)"] = val
+                    elif any(x in lower_name for x in ["(d)", "(def)", "(defense)", "#25"]):
+                        base = name.split("(")[0].split("#")[0].strip()
+                        boosters[f"{base} (D)"] = val
+
     return boosters
+
+
+def get_player_booster(
+    boosters: Dict[str, float],
+    name: str,
+    pos: str = "",
+    is_duplicate: bool = False
+) -> float:
+    """
+    Resolves booster value with support for duplicate player names (e.g. Elias Pettersson C vs D).
+    Lookup priority:
+    1. Exact qualified key: 'Elias Pettersson (C)', 'Elias Pettersson (D)'
+    2. Forward alias if pos in ('C', 'LW', 'RW'): 'Elias Pettersson (F)'
+    3. Unqualified key 'Elias Pettersson':
+       - If is_duplicate: defaults to forward/center (C), returns 0.0 for defenseman unless qualified.
+       - If not duplicate: returns boosters[name].
+    4. Default 0.0
+    """
+    if pos:
+        key_pos = f"{name} ({pos})"
+        if key_pos in boosters:
+            return boosters[key_pos]
+        if pos in ("C", "LW", "RW"):
+            key_f = f"{name} (F)"
+            if key_f in boosters:
+                return boosters[key_f]
+
+    if name in boosters:
+        if is_duplicate:
+            # When duplicate name is unqualified, assign to forward (star player), not defenseman
+            if pos in ("C", "LW", "RW", "F"):
+                return boosters[name]
+            return 0.0
+        return boosters[name]
+
+    return 0.0
 
 
 def save_boosters_file(
@@ -86,18 +133,31 @@ def save_boosters_file(
     lines = [
         "# Real Sports NHL - Player Boosters",
         "# Format: Player Name = Booster (e.g. Matt Boldy = 0.8)",
+        "# Note: For duplicate names, specify position: Elias Pettersson (C) = 1.4 vs Elias Pettersson (D) = 0.0",
         "# Default booster is 0.0x if player is not listed.",
         ""
     ]
 
-    written_names = set()
+    all_skaters = list(active_players) + list(dtd_players or [])
+    name_counts = Counter(p["name"] for p in all_skaters)
+
+    written_keys = set()
 
     # 1. Active healthy players playing today
     for p in active_players:
         name = p["name"]
-        b_val = boosters.get(name, 0.0)
-        lines.append(f"{name:<24} = {b_val:.1f}")
-        written_names.add(name)
+        pos = p.get("pos", "")
+        team = p.get("team", "")
+        is_dup = name_counts[name] > 1
+        key = f"{name} ({pos})" if is_dup else name
+        comment = f"  # {team} {pos}" if is_dup else ""
+
+        if key in written_keys:
+            continue
+        written_keys.add(key)
+
+        b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
+        lines.append(f"{key:<24} = {b_val:.1f}{comment}")
 
     # 2. Day-to-day players (commented out by default)
     if dtd_players:
@@ -105,15 +165,23 @@ def save_boosters_file(
         lines.append("# Day-To-Day players (uncomment if confirmed playing):")
         for p in dtd_players:
             name = p["name"]
-            b_val = boosters.get(name, 0.0)
+            pos = p.get("pos", "")
+            team = p.get("team", "")
+            is_dup = name_counts[name] > 1
+            key = f"{name} ({pos})" if is_dup else name
             detail = p.get("inj_detail") or "Day-To-Day"
-            lines.append(f"# [DTD] {name:<20} = {b_val:.1f}  # {detail}")
-            written_names.add(name)
+
+            if key in written_keys:
+                continue
+            written_keys.add(key)
+
+            b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
+            lines.append(f"# [DTD] {key:<20} = {b_val:.1f}  # {team} {pos} {detail}")
 
     # 3. Any remaining custom boosters
     extras = []
     for name, b_val in boosters.items():
-        if name not in written_names and b_val > 0.0:
+        if name not in written_keys and b_val > 0.0:
             extras.append(f"{name:<24} = {b_val:.1f}")
 
     if extras:
@@ -173,6 +241,12 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
     print("Fetching club rosters and stats in parallel...")
     all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
 
+    all_skater_names = []
+    for team in team_matchups.keys():
+        for p in all_club_stats.get(team, []):
+            all_skater_names.append(f"{p['firstName']['default']} {p['lastName']['default']}")
+    name_counts = Counter(all_skater_names)
+
     players_to_save = []
     for team, (opp, is_home) in team_matchups.items():
         skaters = all_club_stats.get(team, [])
@@ -186,6 +260,8 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
             pos = p.get("positionCode", "F")
             gp = p.get("gamesPlayed", 0)
             avg_toi = p.get("avgTimeOnIcePerGame", 0.0) / 60.0
+            is_dup = name_counts[full_name] > 1
+            display_name = f"{full_name} ({pos})" if is_dup else full_name
 
             players_to_save.append({"id": p_id, "name": full_name, "team": team, "pos": pos})
 
@@ -196,8 +272,8 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
             is_d = pos in ("D", "DEF")
             est_xrrs = calculate_xrrs_projection(g_pg, a_pg, s_pg, blk_pg, is_def=is_d)
 
-            has_booster = (full_name in existing_boosters and existing_boosters[full_name] > 0.0)
-            b_val = existing_boosters.get(full_name, 0.0)
+            b_val = get_player_booster(existing_boosters, full_name, pos, is_duplicate=is_dup)
+            has_booster = b_val > 0.0
 
             # Injury check
             inj = injuries.get(full_name)
@@ -210,6 +286,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
                 elif status == "Day-To-Day" and not has_booster:
                     dtd_players.append({
                         "name": full_name,
+                        "display_name": display_name,
                         "team": team,
                         "pos": pos,
                         "inj_detail": f"{detail} (Day-To-Day)" if detail else "Day-To-Day"
@@ -224,6 +301,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
             candidates.append({
                 "id": p_id,
                 "name": full_name,
+                "display_name": display_name,
                 "team": team,
                 "opp": f"{'vs' if is_home else '@'}{opp}",
                 "opp_goalie": g_name,
@@ -427,6 +505,7 @@ def print_lineup_table(
         tot_boost = f"{item['total_boost']:.1f}x"
         p_xrrs = item.get("xRRS", item.get("base_pts", 0.0))
         score_str = f"{item['score']:.1f} RRS"
+        p_name = item.get("display_name") or item["name"]
         g_name = item.get("opp_goalie", "")
         if g_name and " " in g_name:
             parts = g_name.split()
@@ -437,19 +516,20 @@ def print_lineup_table(
         stack_str = item.get("stack", "")
 
         if has_stacks:
-            print(f"{slot_str:<5} {s_boost:<11} {item['name']:<22} {item['team']:<5} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13} {stack_str}")
+            print(f"{slot_str:<5} {s_boost:<11} {p_name:<22} {item['team']:<5} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13} {stack_str}")
         else:
-            print(f"{slot_str:<5} {s_boost:<11} {item['name']:<22} {item['team']:<5} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13}")
+            print(f"{slot_str:<5} {s_boost:<11} {p_name:<22} {item['team']:<5} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13}")
 
     print("-" * width)
     # Single-line Quant Summary
     top_p = max(lineup, key=lambda x: x["score"]) if lineup else None
+    top_name = (top_p.get("display_name") or top_p["name"]) if top_p else ""
     stacks_found = [p['stack'] for p in lineup if p.get('stack')]
     if stacks_found:
         unique_stacks = sorted(list(set(stacks_found)))
-        print(f"⚡ Quant Summary: Top EV driver {top_p['name']} ({top_p['total_boost']:.1f}x Boost) | Synergistic {', '.join(unique_stacks)} upside stack")
+        print(f"⚡ Quant Summary: Top EV driver {top_name} ({top_p['total_boost']:.1f}x Boost) | Synergistic {', '.join(unique_stacks)} upside stack")
     elif top_p:
-        print(f"⚡ Quant Summary: Anchor play {top_p['name']} ({top_p['total_boost']:.1f}x Boost) | Projected Lineup Total: {total_score:.1f} RRS")
+        print(f"⚡ Quant Summary: Anchor play {top_name} ({top_p['total_boost']:.1f}x Boost) | Projected Lineup Total: {total_score:.1f} RRS")
     print("=" * width + "\n")
 
 
@@ -654,6 +734,12 @@ def main():
     print("Fetching club rosters and stats in parallel...")
     all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
 
+    all_skater_names = []
+    for team in team_matchups.keys():
+        for p in all_club_stats.get(team, []):
+            all_skater_names.append(f"{p['firstName']['default']} {p['lastName']['default']}")
+    name_counts = Counter(all_skater_names)
+
     qualifying_skaters = []
     players_to_save = []
 
@@ -669,9 +755,11 @@ def main():
             pos = p.get("positionCode", "F")
             gp = p.get("gamesPlayed", 0)
             avg_toi = p.get("avgTimeOnIcePerGame", 0.0) / 60.0
+            is_dup = name_counts[full_name] > 1
+            display_name = f"{full_name} ({pos})" if is_dup else full_name
 
             players_to_save.append({"id": p_id, "name": full_name, "team": team, "pos": pos})
-            b_val = boosters.get(full_name, 0.0)
+            b_val = get_player_booster(boosters, full_name, pos, is_duplicate=is_dup)
 
             # Injury check
             inj = injuries.get(full_name)
@@ -691,6 +779,7 @@ def main():
             qualifying_skaters.append({
                 "id": p_id,
                 "name": full_name,
+                "display_name": display_name,
                 "team": team,
                 "opp": opp,
                 "is_home": is_home,
@@ -739,6 +828,7 @@ def main():
         candidates.append({
             "id": p_id,
             "name": s["name"],
+            "display_name": s.get("display_name", s["name"]),
             "team": s["team"],
             "opp": f"{'vs' if s['is_home'] else '@'}{s['opp']}",
             "opp_goalie": s["opp_goalie"],
