@@ -271,7 +271,7 @@ def calculate_xrrs_projection(
     - Low-event / non-scoring skaters are capped to prevent the 'high booster trap'.
     """
     xpts = xg + xa
-    periph = xsog * 0.16 + xblk * 0.35
+    periph = xsog * 0.25 + xblk * 0.50
     scoring_ev = (xg * 2.50) + (xa * 1.05)
 
     # Multi-point upside probability (Poisson model)

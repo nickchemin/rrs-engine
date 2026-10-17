@@ -2,6 +2,31 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.2.0] - 2026-10-18
+
+### Added
+- **Time-Based Slate Started Check**: Slate is marked started if earliest `startTimeUTC <= datetime.now(timezone.utc)`, preventing active lineup overwrites caused by schedule caching.
+- **Deep Historical Settlement**: Merged fresh `/now` logs with `db.get_game_logs(p_id)` in `settle_past_lineups`, settling past season and playoff games with actual boxscores rather than DNP.
+- **Resilient Boxscore Protocol Fetching**: When boxscore request returns empty `{}` for an existing `gameId`, the settlement is deferred to subsequent runs rather than finalized with default blocks.
+- **Rookie & Zero-History Fallback**: Skaters without prior game logs or empty `train_logs` fall back to baseline `xRRS` and are retained as draft candidates.
+- **Same-Position Namesake Disambiguation**: Added `Name (POS, TEAM)` formatting and resolution in `normalize_booster_name`, `resolve_booster`, and `save_boosters_file`.
+- **Depth Skater Discovery**: Skaters with `avg_toi < 14.5` without a custom booster are appended to team sections in `boosters.txt` as commented `# [DEPTH] Player Name = 0.0  # TEAM POS TOI`.
+- **45-Test Offline Unit Suite**: Expanded offline unit test suite to 45 tests across `TestTimezoneAndDates`, `TestBoosterManagement`, `TestGoaliesAndInjuries`, `TestLineupOptimizer`, `TestDatabaseAndHistory`, and `TestNHLClient` with temporary database isolation.
+
+### Changed
+- **Leak-Free ML Projections**: `predictor.predict` now receives `game_logs=train_logs` strictly prior to the slate date, preventing data leakage during retrospective backtests.
+- **Zero-GP Standings Safety**: Teams with 0 games played receive `defense_factor = 1.0`, `ga_per_game = 3.0`, and are excluded from league-wide average GA calculations.
+- **Ambiguous Booster Detection**: Duplicate names without position specification do not fall back to bare names; an explicit warning is output in console.
+- **Composite Key Injury Storage**: ESPN injuries are stored under `(player_name, team)` composite primary key, with atomic table replacement upon update to clear recovered players.
+- **Booster Value Parsing**: `parse_booster_val` uses regex `^[+]?(\d+(?:\.\d+)?)\s*([x%])?`, divides `%` by 100, warns on multipliers $> 5.0$, and reports line numbers on unparsable values.
+- **Pre-Season Filtering & Cache Invalidation**: `gameTypeId == 1` pre-season logs are rejected at top-level; stale logs older than `f"{start_year - 1}-09-01"` trigger full season refresh.
+- **Daily Goalie Cache Partitioning**: `goalies` table migrated to include `game_date TEXT`, isolating goalie predictions per slate date.
+- **Peripheral Weight Alignment**: Synchronized `calculate_xrrs_projection` peripheral weights to `xsog * 0.25 + xblk * 0.50` matching actual `calculate_rrs_from_stats`.
+- **Stack Synergy Formula & Defensemen Pairing**: Calibrated synergy bonus to `base_val * (1.0 + 0.08 + 0.12 * (g_factor - 1.0))`; teams with 2 defensemen as top options pair the top defenseman with the first available forward.
+- **Boosters Single Source of Truth**: When `boosters.txt` exists, it acts as the sole source of truth; `sync_boosters_to_db` deletes database keys absent from the file.
+- **CLI Argument Architecture**: Placed `--sync` and `--history` in a mutually exclusive group, adding format validation for `--history` (`all` or `YYYY-MM-DD`).
+- **Cleaned Imports**: Removed unused `nhl_now` and `parse_toi` from `main.py`, and cleaned unused imports in tests.
+
 ## [2.1.0] - 2026-10-17
 
 ### Added

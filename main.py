@@ -4,15 +4,14 @@ import re
 import argparse
 import unicodedata
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional, Set
 
 from db import Database
-from nhl_api import NHLClient, nhl_now, nhl_today
+from nhl_api import NHLClient, nhl_today
 from model import (
     PerformancePredictor,
     evaluate_model,
-    parse_toi,
     calculate_xrrs_projection,
     calculate_rrs_from_stats
 )
@@ -81,29 +80,40 @@ def name_key(name: str) -> str:
     return " ".join(ascii_str.lower().split())
 
 
-def parse_booster_val(val_str: str) -> float:
+def parse_booster_val(val_str: str, line_num: Optional[int] = None) -> float:
     if not val_str:
         return 0.0
     s = str(val_str).strip()
-    has_pct = "%" in s
-    cleaned = s.lower().replace("+", "").replace("x", "").replace("%", "").strip()
-    try:
-        val = float(cleaned)
-        if has_pct:
-            return val / 100.0
-        return val / 100.0 if val > 10.0 else val
-    except ValueError:
+    m = re.match(r'^[+]?(\d+(?:\.\d+)?)\s*([x%])?', s)
+    if not m or not m.group(1):
+        loc = f"Line {line_num}: " if line_num is not None else ""
+        print(f"⚠️ Warning: {loc}Could not parse booster value '{val_str}', defaulting to 0.0")
         return 0.0
+
+    num = float(m.group(1))
+    unit = m.group(2) or ""
+
+    if unit == "%":
+        return round(num / 100.0, 4)
+    else:
+        if num > 5.0:
+            loc = f"Line {line_num}: " if line_num is not None else ""
+            print(f"⚠️ Warning: {loc}value {num} > 5.0 looks like a percentage, did you mean {num/100:.2f}?")
+        return num
 
 
 def normalize_booster_name(name: str) -> str:
     raw = name.strip()
     if raw.upper().startswith("[DTD]"):
         raw = raw[5:].strip()
+    elif raw.upper().startswith("[DEPTH]"):
+        raw = raw[7:].strip()
 
-    # Match trailing position tag in parentheses: (DEF), (Defense), (D), (C), (L), (R), (F)
-    m = re.search(r'\s*\((def|defense|d|c|l|r|f|rw|lw)\)\s*$', raw, re.IGNORECASE)
+    # Match trailing position and optional team tag in parentheses:
+    # e.g. (D), (C, VAN), (DEF, NYI), (LW, EDM), (F, TOR)
+    m = re.search(r'\s*\((def|defense|d|c|l|r|f|rw|lw)(?:\s*,\s*([a-zA-Z]{2,4}))?\)\s*$', raw, re.IGNORECASE)
     pos_tag = None
+    team_tag = None
     if m:
         p = m.group(1).upper()
         if p in ("DEF", "DEFENSE", "D"):
@@ -116,6 +126,8 @@ def normalize_booster_name(name: str) -> str:
             pos_tag = "C"
         elif p == "F":
             pos_tag = "F"
+        if m.group(2):
+            team_tag = m.group(2).upper()
         base_raw = raw[:m.start()].strip()
     else:
         base_raw = raw
@@ -125,18 +137,28 @@ def normalize_booster_name(name: str) -> str:
     if "elias pettersson" in nk:
         lower_raw = raw.lower()
         if any(x in lower_raw for x in ["(d)", "(def)", "(defense)", "#25"]):
-            return f"{name_key('Elias Pettersson')} (D)"
-        return f"{name_key('Elias Pettersson')} (C)"
+            pos_part = "D"
+        else:
+            pos_part = "C"
+        if team_tag:
+            return f"{name_key('Elias Pettersson')} ({pos_part}, {team_tag})"
+        return f"{name_key('Elias Pettersson')} ({pos_part})"
 
+    if pos_tag and team_tag:
+        return f"{nk} ({pos_tag}, {team_tag})"
     if pos_tag:
         return f"{nk} ({pos_tag})"
     return nk
+
+
+_warned_ambiguous_names: Set[str] = set()
 
 
 def resolve_booster(
     boosters: Dict[str, float],
     name: str,
     pos: str = "",
+    team: str = "",
     is_duplicate: bool = False
 ) -> Tuple[float, Optional[str]]:
     base = name_key(name)
@@ -161,39 +183,66 @@ def resolve_booster(
         group_canon = "F"
 
     is_forward = (group_canon == "F")
+    team_clean = team.strip().upper() if team else ""
 
     if is_duplicate:
         keys_to_try = []
+        if pos_canon and team_clean:
+            keys_to_try.append(f"{base} ({pos_canon}, {team_clean})")
         if pos_canon:
             keys_to_try.append(f"{base} ({pos_canon})")
         if group_canon and group_canon != pos_canon:
+            if team_clean:
+                keys_to_try.append(f"{base} ({group_canon}, {team_clean})")
             keys_to_try.append(f"{base} ({group_canon})")
         if is_forward and "C" not in (pos_canon, group_canon):
+            if team_clean:
+                keys_to_try.append(f"{base} (C, {team_clean})")
             keys_to_try.append(f"{base} (C)")
-        keys_to_try.append(base)
+
+        for k in keys_to_try:
+            if k in boosters:
+                return boosters[k], k
+            if k.lower() in boosters:
+                return boosters[k.lower()], k
+
+        if base in boosters or base.lower() in boosters:
+            if base not in _warned_ambiguous_names:
+                _warned_ambiguous_names.add(base)
+                print(f"⚠️ Warning: Ambiguous booster key '{name}' matched multiple active players. Please specify position in boosters.txt.")
+        return 0.0, None
     else:
         keys_to_try = [base]
+        if pos_canon and team_clean:
+            keys_to_try.append(f"{base} ({pos_canon}, {team_clean})")
         if pos_canon:
             keys_to_try.append(f"{base} ({pos_canon})")
         if group_canon and group_canon != pos_canon:
+            if team_clean:
+                keys_to_try.append(f"{base} ({group_canon}, {team_clean})")
             keys_to_try.append(f"{base} ({group_canon})")
         if is_forward and "C" not in (pos_canon, group_canon):
+            if team_clean:
+                keys_to_try.append(f"{base} (C, {team_clean})")
             keys_to_try.append(f"{base} (C)")
 
-    for k in keys_to_try:
-        if k in boosters:
-            return boosters[k], k
+        for k in keys_to_try:
+            if k in boosters:
+                return boosters[k], k
+            if k.lower() in boosters:
+                return boosters[k.lower()], k
 
-    return 0.0, None
+        return 0.0, None
 
 
 def get_player_booster(
     boosters: Dict[str, float],
     name: str,
     pos: str = "",
+    team: str = "",
     is_duplicate: bool = False
 ) -> float:
-    val, _ = resolve_booster(boosters, name, pos, is_duplicate)
+    val, _ = resolve_booster(boosters, name, pos, team=team, is_duplicate=is_duplicate)
     return val
 
 
@@ -203,7 +252,7 @@ def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
         return boosters
 
     with open(path, "r", encoding="utf-8-sig") as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -224,7 +273,7 @@ def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
             if len(parts) == 2:
                 raw_name = parts[0].strip()
                 val_raw = parts[1].strip()
-                val = parse_booster_val(val_raw)
+                val = parse_booster_val(val_raw, line_num=line_num)
                 canon_name = normalize_booster_name(raw_name)
                 if canon_name:
                     boosters[canon_name] = val
@@ -236,6 +285,7 @@ def save_boosters_file(
     boosters: Dict[str, float],
     active_players: List[Dict[str, Any]],
     dtd_players: Optional[List[Dict[str, Any]]] = None,
+    depth_players: Optional[List[Dict[str, Any]]] = None,
     path: str = BOOSTERS_FILE
 ):
     lines = [
@@ -248,11 +298,22 @@ def save_boosters_file(
         ""
     ]
 
-    all_skaters = list(active_players) + list(dtd_players or [])
+    all_skaters = list(active_players) + list(dtd_players or []) + list(depth_players or [])
     name_counts = Counter(p["name"] for p in all_skaters)
+    name_pos_counts = Counter((p["name"], p.get("pos", "")) for p in all_skaters)
 
     all_teams = sorted(list(set(p.get("team", "") for p in all_skaters if p.get("team"))))
     written_keys = set()
+
+    def get_player_key(name: str, pos: str, team: str) -> Tuple[str, bool]:
+        is_pos_dup = name_pos_counts[(name, pos)] > 1
+        is_name_dup = name_counts[name] > 1
+        if is_pos_dup:
+            return f"{name} ({pos}, {team})", True
+        elif is_name_dup:
+            return f"{name} ({pos})", True
+        else:
+            return name, False
 
     for team in all_teams:
         team_name = NHL_TEAM_NAMES.get(team, team)
@@ -267,15 +328,14 @@ def save_boosters_file(
         for p in team_active:
             name = p["name"]
             pos = p.get("pos", "")
-            is_dup = name_counts[name] > 1
-            key = f"{name} ({pos})" if is_dup else name
+            key, is_dup = get_player_key(name, pos, team)
             comment = f"  # {team} {pos}" if is_dup else ""
 
             if key in written_keys:
                 continue
             written_keys.add(key)
 
-            b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
+            b_val = get_player_booster(boosters, name, pos, team=team, is_duplicate=is_dup)
             lines.append(f"{key:<24} = {b_val:.1f}{comment}")
 
         # 2. Day-To-Day players on this team (commented out)
@@ -286,16 +346,36 @@ def save_boosters_file(
             for p in team_dtd:
                 name = p["name"]
                 pos = p.get("pos", "")
-                is_dup = name_counts[name] > 1
-                key = f"{name} ({pos})" if is_dup else name
+                key, is_dup = get_player_key(name, pos, team)
                 detail = p.get("inj_detail") or "Day-To-Day"
 
                 if key in written_keys:
                     continue
                 written_keys.add(key)
 
-                b_val = get_player_booster(boosters, name, pos, is_duplicate=is_dup)
+                b_val = get_player_booster(boosters, name, pos, team=team, is_duplicate=is_dup)
                 lines.append(f"# [DTD] {key:<20} = {b_val:.1f}  # {team} {pos} {detail}")
+
+        # 3. Depth players on this team (commented out)
+        if depth_players:
+            team_depth = [p for p in depth_players if p.get("team") == team]
+            team_depth.sort(key=lambda x: x.get("avg_toi", 0.0), reverse=True)
+
+            for p in team_depth:
+                name = p["name"]
+                pos = p.get("pos", "")
+                avg_toi = p.get("avg_toi", 0.0)
+                mins = int(avg_toi)
+                secs = int(round((avg_toi - mins) * 60))
+                toi_str = f"{mins:02d}:{secs:02d}"
+
+                key, is_dup = get_player_key(name, pos, team)
+                if key in written_keys:
+                    continue
+                written_keys.add(key)
+
+                b_val = get_player_booster(boosters, name, pos, team=team, is_duplicate=is_dup)
+                lines.append(f"# [DEPTH] {key:<18} = {b_val:.1f}  # {team} {pos} {toi_str}")
 
         lines.append("")
 
@@ -304,40 +384,40 @@ def save_boosters_file(
 
 
 def sync_boosters_to_db(db: Database, boosters: Dict[str, float]):
-    non_canon_keys = []
+    canon_keys = set()
     for raw_name, val in boosters.items():
         canon = normalize_booster_name(raw_name)
         db.set_booster(canon, val)
-        if raw_name != canon:
-            non_canon_keys.append(raw_name)
+        canon_keys.add(canon)
 
     db_boosters = db.get_all_boosters()
-    for k in db_boosters.keys():
-        canon = normalize_booster_name(k)
-        if k != canon:
-            non_canon_keys.append(k)
-
-    non_canon_keys.extend(["Elias Pettersson", "Elias Pettersson (F)"])
-    if non_canon_keys:
-        db.delete_boosters(list(set(non_canon_keys)))
+    keys_to_delete = [k for k in db_boosters.keys() if k not in canon_keys]
+    if keys_to_delete:
+        db.delete_boosters(keys_to_delete)
 
 
 def match_injury(
-    injuries: Dict[str, Dict[str, str]],
+    injuries: Dict[Any, Dict[str, str]],
     player_name: str,
     player_team: str,
     is_duplicate: bool
 ) -> Optional[Dict[str, str]]:
     p_nk = name_key(player_name)
-    for inj_name, inj_data in injuries.items():
+    p_team = player_team.upper()
+    for key, inj_data in injuries.items():
+        if isinstance(key, tuple):
+            inj_name, raw_team = key
+        else:
+            inj_name = inj_data.get("name") or key
+            raw_team = inj_data.get("team", "")
+
         if name_key(inj_name) == p_nk:
-            raw_team = inj_data.get("team", "").upper()
-            mapped_team = ESPN_TEAM_MAP.get(raw_team, raw_team)
+            mapped_team = ESPN_TEAM_MAP.get(raw_team.upper(), raw_team.upper())
             if is_duplicate:
-                if mapped_team == player_team:
+                if mapped_team == p_team:
                     return inj_data
             else:
-                if not mapped_team or mapped_team == player_team:
+                if not mapped_team or mapped_team == p_team:
                     return inj_data
     return None
 
@@ -347,9 +427,9 @@ def collect_slate_skaters(
     db: Database,
     team_matchups: Dict[str, Tuple[str, bool]],
     goalies: Dict[str, Dict[str, Any]],
-    injuries: Dict[str, Dict[str, str]],
+    injuries: Dict[Any, Dict[str, str]],
     boosters: Dict[str, float]
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, Set[str]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int, int, Set[str]]:
     all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
 
     all_skater_names = []
@@ -360,6 +440,7 @@ def collect_slate_skaters(
 
     active_skaters: List[Dict[str, Any]] = []
     dtd_skaters: List[Dict[str, Any]] = []
+    depth_skaters: List[Dict[str, Any]] = []
     players_to_save: List[Dict[str, Any]] = []
     matched_booster_keys: Set[str] = set()
 
@@ -383,7 +464,7 @@ def collect_slate_skaters(
 
             players_to_save.append({"id": p_id, "name": full_name, "team": team, "pos": pos})
 
-            b_val, matched_key = resolve_booster(boosters, full_name, pos, is_duplicate=is_dup)
+            b_val, matched_key = resolve_booster(boosters, full_name, pos, team=team, is_duplicate=is_dup)
             if matched_key:
                 matched_booster_keys.add(matched_key)
 
@@ -410,6 +491,14 @@ def collect_slate_skaters(
 
             # Fast filter: skip non-scoring depth players if no custom booster
             if not has_booster and (gp < 1 or avg_toi < 14.5):
+                depth_skaters.append({
+                    "name": full_name,
+                    "display_name": display_name,
+                    "team": team,
+                    "pos": pos,
+                    "gp": gp,
+                    "avg_toi": avg_toi
+                })
                 continue
 
             # Baseline calculation for game-day previews
@@ -440,7 +529,7 @@ def collect_slate_skaters(
     if players_to_save:
         db.save_players_batch(players_to_save)
 
-    return active_skaters, dtd_skaters, excluded_count, dtd_skipped_count, matched_booster_keys
+    return active_skaters, dtd_skaters, depth_skaters, excluded_count, dtd_skipped_count, matched_booster_keys
 
 
 def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force: bool = False) -> List[Dict[str, Any]]:
@@ -475,12 +564,13 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
         team_matchups[home] = (away, True)
         team_matchups[away] = (home, False)
 
-    existing_boosters = db.get_all_boosters()
-    file_boosters = load_boosters_file()
-    existing_boosters.update(file_boosters)
+    if os.path.exists(BOOSTERS_FILE):
+        existing_boosters = load_boosters_file(BOOSTERS_FILE)
+    else:
+        existing_boosters = db.get_all_boosters()
 
     print("Fetching club rosters and stats in parallel...")
-    active_skaters, dtd_skaters, excluded_count, dtd_skipped, _ = collect_slate_skaters(
+    active_skaters, dtd_skaters, depth_skaters, excluded_count, dtd_skipped, _ = collect_slate_skaters(
         client, db, team_matchups, goalies, injuries, existing_boosters
     )
 
@@ -488,7 +578,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
     dtd_skaters.sort(key=lambda x: x["name"])
 
     # Save to boosters.txt
-    save_boosters_file(existing_boosters, candidates, dtd_players=dtd_skaters)
+    save_boosters_file(existing_boosters, candidates, dtd_players=dtd_skaters, depth_players=depth_skaters)
     sync_boosters_to_db(db, existing_boosters)
 
     print(f"Saved {len(candidates)} active game-day players to {os.path.basename(BOOSTERS_FILE)}")
@@ -580,13 +670,16 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             p1, p2 = plist[0], plist[1]
             f_count = sum(1 for p in (p1, p2) if p.get("pos") not in ("D", "DEF"))
             if f_count == 0:
-                continue
+                first_forward = next((p for p in plist[1:] if p.get("pos") not in ("D", "DEF")), None)
+                if not first_forward:
+                    continue
+                p2 = first_forward
 
             p1_r = p1.get("xRRS", p1.get("base_pts", 0.0))
             p2_r = p2.get("xRRS", p2.get("base_pts", 0.0))
             base_val = (p1_r * (1.6 + p1.get("booster", 0.0))) + (p2_r * (1.6 + p2.get("booster", 0.0)))
             g_factor = p1.get("goalie_factor", 1.0)
-            syn_val = base_val * (1.0 + 0.12 * g_factor)
+            syn_val = base_val * (1.0 + 0.08 + 0.12 * (g_factor - 1.0))
             viable_stacks.append({
                 "team": team,
                 "players": [p1, p2],
@@ -724,21 +817,34 @@ def settle_past_lineups(client: NHLClient, db: Database):
     settled_count = 0
 
     for r in past_unsettled:
-        p_id = r.get("player_id")
-        if not p_id or p_id not in players_map:
-            p_obj = players_by_name.get(r["player_name"])
-            p_id = p_obj["player_id"] if p_obj else None
-
-        if not p_id:
+        if not r.get("player_id"):
             continue
+
+        p_id = r["player_id"]
+        if p_id not in players_map:
+            p_obj = players_by_name.get(r["player_name"])
+            p_id = p_obj["player_id"] if p_obj else p_id
 
         if p_id not in logs_cache:
             logs_cache[p_id] = client.get_player_current_game_logs(p_id)
 
-        logs = logs_cache[p_id]
-        if logs is None:
+        fresh_logs = logs_cache[p_id]
+        if fresh_logs is None:
             # Network issue; skip settling for now
             continue
+
+        # Merge fresh_logs and db_logs
+        db_logs = db.get_game_logs(p_id) or []
+        combined_logs_map = {}
+        for g in db_logs:
+            k = g.get("gameId") or g.get("gameDate")
+            if k:
+                combined_logs_map[k] = g
+        for g in fresh_logs:
+            k = g.get("gameId") or g.get("gameDate")
+            if k:
+                combined_logs_map[k] = g
+        logs = list(combined_logs_map.values())
 
         match = next((g for g in logs if g.get("gameDate") == r["game_date"]), None)
         if match:
@@ -753,13 +859,22 @@ def settle_past_lineups(client: NHLClient, db: Database):
 
             if game_id:
                 box_skaters = client.get_boxscore_skaters(game_id)
-                if box_skaters and p_id in box_skaters:
+                if not box_skaters:
+                    # Request failed or protocol empty; skip record until next run
+                    continue
+                if p_id in box_skaters:
                     p_box = box_skaters[p_id]
                     g = float(p_box.get("goals", 0))
                     a = float(p_box.get("assists", 0))
                     s = float(p_box.get("sog", 0))
                     blk = float(p_box.get("blockedShots", 0))
                     toi_str = p_box.get("toi", toi_str)
+                else:
+                    g = 0.0
+                    a = 0.0
+                    s = 0.0
+                    blk = 0.0
+                    toi_str = "DNP"
 
             actual_xrrs = calculate_rrs_from_stats(g, a, s, blk)
             actual_rrs = round(actual_xrrs * r["total_boost"], 2)
@@ -870,13 +985,24 @@ def load_or_fetch_standings(client: NHLClient) -> Dict[str, Dict[str, float]]:
     return standings
 
 
+def parse_history_arg(val: str) -> str:
+    if not val or val.lower() == "all":
+        return "all"
+    try:
+        datetime.strptime(val, "%Y-%m-%d")
+        return val
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid history date '{val}'. Expected 'all' or 'YYYY-MM-DD'.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="RRS Engine v2.0 - Real Rating System & NHL Quant Draft Optimizer")
-    parser.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
+    group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     parser.add_argument("--date", type=parse_iso_date_arg, default="", help="Target date (YYYY-MM-DD), default is current day")
     parser.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
     parser.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
-    parser.add_argument("--history", nargs="?", const="all", default=None, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     args = parser.parse_args()
 
     if args.sync:
@@ -951,7 +1077,7 @@ def main():
     goalies = client.get_starting_goalies(games=games)
 
     print("Fetching club rosters and stats in parallel...")
-    active_skaters, _, excluded_injuries, dtd_skipped, matched_keys = collect_slate_skaters(
+    active_skaters, _, _, excluded_injuries, dtd_skipped, matched_keys = collect_slate_skaters(
         client, db, team_matchups, goalies, injuries, boosters
     )
 
@@ -976,8 +1102,6 @@ def main():
     for idx, s in enumerate(active_skaters, 1):
         p_id = s["id"]
         logs = logs_map.get(p_id) or []
-        if not logs:
-            continue
 
         if idx % 5 == 0 or idx == total_qual:
             sys.stdout.write(f"\rTraining ML models & projecting xRRS: [{idx}/{total_qual}]...")
@@ -986,17 +1110,24 @@ def main():
         # Do not train on matches from the slate date or later
         train_logs = [l for l in logs if l.get("gameDate", "") < game_date]
 
-        predictor = PerformancePredictor()
-        predictor.train(train_logs, standings)
-        pred = predictor.predict(
-            game_logs=logs,
-            is_home=s["is_home"],
-            opponent_abbrev=s["opp"],
-            game_date=game_date,
-            standings=standings,
-            position=s["pos"],
-            goalie_factor=s["goalie_factor"]
-        )
+        pred_xrrs = s.get("xRRS", 0.0)
+        base_pts = pred_xrrs
+
+        if train_logs:
+            predictor = PerformancePredictor()
+            predictor.train(train_logs, standings)
+            if predictor.is_trained:
+                pred = predictor.predict(
+                    game_logs=train_logs,
+                    is_home=s["is_home"],
+                    opponent_abbrev=s["opp"],
+                    game_date=game_date,
+                    standings=standings,
+                    position=s["pos"],
+                    goalie_factor=s["goalie_factor"]
+                )
+                pred_xrrs = pred["xRRS"]
+                base_pts = pred["base_pts"]
 
         candidates.append({
             "id": p_id,
@@ -1007,8 +1138,8 @@ def main():
             "opp_goalie": s["opp_goalie"],
             "goalie_factor": s["goalie_factor"],
             "pos": s["pos"],
-            "xRRS": pred["xRRS"],
-            "base_pts": pred["base_pts"],
+            "xRRS": pred_xrrs,
+            "base_pts": base_pts,
             "booster": s["booster"]
         })
 
@@ -1020,6 +1151,17 @@ def main():
     today_str = nhl_today()
     is_past = (game_date < today_str)
     any_started = any(g.get("gameState") in ("LIVE", "CRIT", "OFF", "FINAL") for g in games)
+    now_utc = datetime.now(timezone.utc)
+    for g in games:
+        st = g.get("startTimeUTC")
+        if st:
+            try:
+                game_time = datetime.fromisoformat(st.replace("Z", "+00:00"))
+                if game_time <= now_utc:
+                    any_started = True
+                    break
+            except Exception:
+                pass
     can_save_history = (not is_past) and (not any_started)
 
     # 4. Solve optimal 5-slot lineup(s)

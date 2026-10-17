@@ -4,7 +4,7 @@ import re
 import os
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -64,9 +64,15 @@ class NHLClient:
 
                 for s in standings:
                     team = s.get("teamAbbrev", {}).get("default")
-                    gp = s.get("gamesPlayed", 1) or 1
+                    gp = s.get("gamesPlayed", 0) or 0
+                    if gp == 0:
+                        metrics[team] = {
+                            "ga_per_game": 3.0,
+                            "defense_factor": 1.0
+                        }
+                        continue
                     ga = s.get("goalAgainst", 0)
-                    ga_per_game = ga / gp if gp > 0 else 3.0
+                    ga_per_game = ga / gp
                     team_ga_gp[team] = ga_per_game
                     total_ga += ga
                     total_gp += gp
@@ -145,24 +151,30 @@ class NHLClient:
         force: bool = False
     ) -> List[Dict[str, Any]]:
         if not force and self.db.has_game_logs(player_id):
-            # Fast check: sync newly completed games from the current season
-            try:
-                url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
-                res = self.session.get(url, timeout=6)
-                if res.status_code == 200:
-                    current_logs = res.json().get("gameLog", [])
-                    valid_logs = []
-                    for g in current_logs:
-                        if g.get("gameTypeId") == 1:
-                            continue
-                        if not g.get("seasonId"):
-                            g["seasonId"] = season_from_date(g.get("gameDate", ""))
-                        valid_logs.append(g)
-                    if valid_logs:
-                        self.db.save_game_logs(player_id, valid_logs)
-            except Exception:
-                pass
-            return self.db.get_game_logs(player_id)
+            cached_logs = self.db.get_game_logs(player_id)
+            latest_date = cached_logs[-1].get("gameDate", "") if cached_logs else ""
+            cutoff_date = f"{current_season_start_year() - 1}-09-01"
+            if latest_date >= cutoff_date:
+                # Fast check: sync newly completed games from the current season
+                try:
+                    url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
+                    res = self.session.get(url, timeout=6)
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("gameTypeId") != 1:
+                            current_logs = data.get("gameLog", [])
+                            valid_logs = []
+                            for g in current_logs:
+                                if g.get("gameTypeId") == 1:
+                                    continue
+                                if not g.get("seasonId"):
+                                    g["seasonId"] = season_from_date(g.get("gameDate", ""))
+                                valid_logs.append(g)
+                            if valid_logs:
+                                self.db.save_game_logs(player_id, valid_logs)
+                except Exception:
+                    pass
+                return self.db.get_game_logs(player_id)
 
         # Check legacy .cache folder if present - only if DB has no logs
         cache_file = os.path.join(os.path.dirname(__file__), ".cache", f"game_logs_{player_id}.json")
@@ -218,6 +230,8 @@ class NHLClient:
             res = self.session.get(url, timeout=6)
             if res.status_code == 200:
                 data = res.json()
+                if data.get("gameTypeId") == 1:
+                    return []
                 logs = data.get("gameLog", [])
                 valid_logs = []
                 for g in logs:
@@ -306,7 +320,7 @@ class NHLClient:
             print(f"Failed to fetch roster for {team_abbrev}: {e}")
         return []
 
-    def get_injuries(self, force: bool = False) -> Dict[str, Dict[str, str]]:
+    def get_injuries(self, force: bool = False) -> Dict[Tuple[str, str], Dict[str, str]]:
         if not force:
             cached = self.db.get_injuries()
             if cached:
@@ -334,7 +348,8 @@ class NHLClient:
                             "status": status,
                             "detail": detail
                         })
-                        injuries_map[name] = {
+                        injuries_map[(name, team)] = {
+                            "name": name,
                             "team": team,
                             "status": status,
                             "detail": detail
@@ -349,8 +364,10 @@ class NHLClient:
     def get_starting_goalies(
         self,
         games: Optional[List[Dict[str, Any]]] = None,
-        force: bool = False
+        force: bool = False,
+        game_date: str = ""
     ) -> Dict[str, Dict[str, Any]]:
+        slate_date = game_date or (games[0].get("date", "") if games else "")
         slate_teams = set()
         slate_matchups = set()
         if games:
@@ -365,7 +382,7 @@ class NHLClient:
                     slate_matchups.add((h, a))
 
         if not force:
-            cached = self.db.get_starting_goalies()
+            cached = self.db.get_starting_goalies(game_date=slate_date)
             if cached:
                 if not slate_teams or slate_teams.issubset(cached.keys()):
                     for t, d in cached.items():
@@ -461,7 +478,7 @@ class NHLClient:
                         pass
 
         if goalies:
-            self.db.save_starting_goalies(goalies)
+            self.db.save_starting_goalies(goalies, game_date=slate_date)
 
         return goalies
 

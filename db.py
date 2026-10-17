@@ -96,15 +96,17 @@ class Database:
                 );
 
                 CREATE TABLE IF NOT EXISTS injuries (
-                    player_name TEXT PRIMARY KEY,
-                    team TEXT,
+                    player_name TEXT NOT NULL,
+                    team TEXT NOT NULL,
                     status TEXT NOT NULL,
                     detail TEXT,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (player_name, team)
                 );
 
                 CREATE TABLE IF NOT EXISTS goalies (
                     team TEXT PRIMARY KEY,
+                    game_date TEXT NOT NULL DEFAULT '',
                     goalie_name TEXT NOT NULL,
                     status TEXT NOT NULL,
                     save_pct REAL NOT NULL,
@@ -174,6 +176,30 @@ class Database:
                             proj_rrs = ROUND(proj_rrs / 1.2, 2),
                             calibrated = 1
                     """)
+
+            # Schema migration for injuries composite primary key
+            cur.execute("PRAGMA table_info(injuries)")
+            inj_info = cur.fetchall()
+            if inj_info:
+                pk_cols = [c["name"] for c in inj_info if c["pk"] > 0]
+                if len(pk_cols) == 1 and pk_cols[0] == "player_name":
+                    cur.execute("DROP TABLE injuries")
+                    cur.execute("""
+                        CREATE TABLE injuries (
+                            player_name TEXT NOT NULL,
+                            team TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            detail TEXT,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (player_name, team)
+                        )
+                    """)
+
+            # Schema migration for goalies game_date column
+            cur.execute("PRAGMA table_info(goalies)")
+            g_cols = [c["name"] for c in cur.fetchall()]
+            if g_cols and "game_date" not in g_cols:
+                cur.execute("ALTER TABLE goalies ADD COLUMN game_date TEXT DEFAULT ''")
 
             conn.commit()
 
@@ -429,7 +455,7 @@ class Database:
             conn.commit()
 
     # --- Injuries ---
-    def get_injuries(self, max_age_hours: float = 4.0) -> Optional[Dict[str, Dict[str, str]]]:
+    def get_injuries(self, max_age_hours: float = 4.0) -> Optional[Dict[Tuple[str, str], Dict[str, str]]]:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
@@ -438,7 +464,8 @@ class Database:
             if not rows:
                 return None
             return {
-                r["player_name"]: {
+                (r["player_name"], r["team"] or ""): {
+                    "name": r["player_name"],
                     "team": r["team"] or "",
                     "status": r["status"],
                     "detail": r["detail"] or ""
@@ -449,15 +476,11 @@ class Database:
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
+            cur.execute("DELETE FROM injuries")
             for item in injuries:
                 cur.execute("""
                     INSERT INTO injuries (player_name, team, status, detail, updated_at)
                     VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(player_name) DO UPDATE SET
-                        team=excluded.team,
-                        status=excluded.status,
-                        detail=excluded.detail,
-                        updated_at=excluded.updated_at
                 """, (
                     item.get("name", ""),
                     item.get("team", ""),
@@ -465,12 +488,14 @@ class Database:
                     item.get("detail", ""),
                     now
                 ))
-            conn.commit()
 
-    def get_player_injury(self, player_name: str) -> Optional[Dict[str, str]]:
+    def get_player_injury(self, player_name: str, team: str = "") -> Optional[Dict[str, str]]:
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT team, status, detail FROM injuries WHERE player_name = ?", (player_name,))
+            if team:
+                cur.execute("SELECT team, status, detail FROM injuries WHERE player_name = ? AND team = ?", (player_name, team))
+            else:
+                cur.execute("SELECT team, status, detail FROM injuries WHERE player_name = ?", (player_name,))
             r = cur.fetchone()
             if r:
                 return {
@@ -481,11 +506,22 @@ class Database:
             return None
 
     # --- Goalies ---
-    def get_starting_goalies(self, max_age_hours: float = 4.0) -> Optional[Dict[str, Dict[str, Any]]]:
+    def get_starting_goalies(self, game_date: str = "", max_age_hours: float = 4.0) -> Optional[Dict[str, Dict[str, Any]]]:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT team, goalie_name, status, save_pct, gaa, updated_at FROM goalies WHERE updated_at > ?", (min_updated,))
+            if game_date:
+                cur.execute("""
+                    SELECT team, game_date, goalie_name, status, save_pct, gaa, updated_at
+                    FROM goalies
+                    WHERE updated_at > ? AND game_date = ?
+                """, (min_updated, game_date))
+            else:
+                cur.execute("""
+                    SELECT team, game_date, goalie_name, status, save_pct, gaa, updated_at
+                    FROM goalies
+                    WHERE updated_at > ?
+                """, (min_updated,))
             rows = cur.fetchall()
             if not rows:
                 return None
@@ -494,19 +530,22 @@ class Database:
                     "goalie_name": r["goalie_name"],
                     "status": r["status"],
                     "save_pct": float(r["save_pct"]),
-                    "gaa": float(r["gaa"])
+                    "gaa": float(r["gaa"]),
+                    "game_date": r["game_date"] or ""
                 } for r in rows
             }
 
-    def save_starting_goalies(self, goalies: Dict[str, Dict[str, Any]]):
+    def save_starting_goalies(self, goalies: Dict[str, Dict[str, Any]], game_date: str = ""):
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
             for team, data in goalies.items():
+                g_date = data.get("game_date") or game_date
                 cur.execute("""
-                    INSERT INTO goalies (team, goalie_name, status, save_pct, gaa, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO goalies (team, game_date, goalie_name, status, save_pct, gaa, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(team) DO UPDATE SET
+                        game_date=excluded.game_date,
                         goalie_name=excluded.goalie_name,
                         status=excluded.status,
                         save_pct=excluded.save_pct,
@@ -514,13 +553,13 @@ class Database:
                         updated_at=excluded.updated_at
                 """, (
                     team,
+                    g_date,
                     data.get("goalie_name", ""),
                     data.get("status", "Projected"),
                     float(data.get("save_pct", 0.902)),
                     float(data.get("gaa", 3.00)),
                     now
                 ))
-            conn.commit()
 
     # --- Lineup History & Tracking ---
     def save_lineup_history(self, game_date: str, mode: str, lineup: List[Dict[str, Any]]):
