@@ -7,7 +7,13 @@ from typing import List, Dict, Any, Tuple, Optional
 
 from db import Database
 from nhl_api import NHLClient
-from model import PerformancePredictor, evaluate_model, parse_toi
+from model import (
+    PerformancePredictor,
+    evaluate_model,
+    parse_toi,
+    calculate_xrrs_projection,
+    calculate_rrs_from_stats
+)
 
 # Ensure UTF-8 output on Windows console
 if sys.platform == "win32":
@@ -187,8 +193,8 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
             a_pg = ((p.get("assists", 0) / gp) * (1.0 + 0.5 * (g_factor - 1.0))) if gp else 0.0
             s_pg = (p.get("shots", 0) / gp) if gp else 0.0
             blk_pg = avg_toi * (0.09 if pos in ("D", "DEF") else 0.04)
-            # RRS (Real Rating System) calibrated scale:
-            est_xrrs = round((g_pg * 12.0 + a_pg * 8.0 + s_pg * 1.6 + blk_pg * 1.6) / 7.2, 2)
+            is_d = pos in ("D", "DEF")
+            est_xrrs = calculate_xrrs_projection(g_pg, a_pg, s_pg, blk_pg, is_def=is_d)
 
             has_booster = (full_name in existing_boosters and existing_boosters[full_name] > 0.0)
             b_val = existing_boosters.get(full_name, 0.0)
@@ -324,11 +330,16 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
     for team, plist in by_team.items():
         if len(plist) >= 2:
             p1, p2 = plist[0], plist[1]
+            # Require at least one forward to ensure real offensive goal correlation
+            f_count = sum(1 for p in (p1, p2) if p.get("pos") not in ("D", "DEF"))
+            if f_count == 0:
+                continue
+
             p1_r = p1.get("xRRS", p1.get("base_pts", 0.0))
             p2_r = p2.get("xRRS", p2.get("base_pts", 0.0))
             base_val = (p1_r * (1.6 + p1["booster"])) + (p2_r * (1.6 + p2["booster"]))
             g_factor = p1.get("goalie_factor", 1.0)
-            syn_val = base_val * (1.0 + 0.08 * g_factor)
+            syn_val = base_val * (1.0 + 0.12 * g_factor)
             viable_stacks.append({
                 "team": team,
                 "players": [p1, p2],
@@ -477,8 +488,8 @@ def settle_past_lineups(client: NHLClient, db: Database):
             toi_min = float(parts[0]) + float(parts[1]) / 60.0 if len(parts) == 2 else 0.0
             blk_rate = 0.09 if match.get("positionCode") in ("D", "DEF") else 0.04
             blk = toi_min * blk_rate
-            # RRS calibrated scale (haircut applied: divisor 7.2):
-            actual_xrrs = round((g * 12.0 + a * 8.0 + s * 1.6 + blk * 1.6) / 7.2, 2)
+            # Real Rating System (RRS) actual rating:
+            actual_xrrs = calculate_rrs_from_stats(g, a, s, blk)
             actual_rrs = round(actual_xrrs * r["total_boost"], 2)
             db.settle_history_player(r["id"], g, a, s, toi_str, actual_xrrs, actual_rrs)
             settled_count += 1

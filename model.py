@@ -235,15 +235,13 @@ class PerformancePredictor:
         toi_sec = int((preds["toi"] - toi_min) * 60)
         formatted_toi = f"{toi_min:02d}:{toi_sec:02d}"
 
-        # RRS (Real Rating System) scoring scale:
-        # Calibrated baseline: G=1.67, A=1.11, S=0.22, BLK=0.22 (haircut applied: divisor 7.2)
-        # Yields a realistic 8-10 RRS adjustment across 5 boosted slots
-        rrs_base = round(
-            (preds["goals"] * 12.0 +
-             preds["assists"] * 8.0 +
-             preds["shots"] * 1.6 +
-             blocked * 1.6) / 7.2,
-            2
+        # RRS (Real Rating System) calibrated projection:
+        rrs_base = calculate_xrrs_projection(
+            xg=preds["goals"],
+            xa=preds["assists"],
+            xsog=preds["shots"],
+            xblk=blocked,
+            is_def=is_def
         )
 
         return {
@@ -256,6 +254,77 @@ class PerformancePredictor:
             "xRRS": rrs_base,
             "base_pts": rrs_base
         }
+
+
+def calculate_xrrs_projection(
+    xg: float,
+    xa: float,
+    xsog: float,
+    xblk: float,
+    is_def: bool = False
+) -> float:
+    """
+    Computes expected Real Rating (xRRS) calibrated to the Real Sports mobile app:
+    - Zero-point baseline: 0.0 - 0.9 (peripherals: SOG ~0.16, BLK ~0.35).
+    - Goal expectancy: ~2.5 - 2.8 rating.
+    - Assist expectancy: ~1.0 - 1.2 rating.
+    - Multi-point exponential upside.
+    - Low-event / non-scoring skaters are capped to prevent the 'high booster trap'.
+    """
+    xpts = xg + xa
+    periph = xsog * 0.16 + xblk * 0.35
+    scoring_ev = (xg * 2.50) + (xa * 1.05)
+
+    # Multi-point upside probability (Poisson model)
+    p_multi = max(0.0, 1.0 - np.exp(-xpts) - xpts * np.exp(-xpts))
+    multi_bonus = p_multi * 1.4
+
+    xrrs = scoring_ev + multi_bonus + periph
+
+    # Cap players with negligible scoring upside to prevent artificial booster inflation
+    if is_def and xg < 0.08 and xa < 0.20:
+        xrrs = min(0.85, xrrs)
+    elif not is_def and xg < 0.10 and xa < 0.15:
+        xrrs = min(0.95, xrrs)
+
+    return round(float(max(0.0, xrrs)), 2)
+
+
+def calculate_rrs_from_stats(
+    goals: float,
+    assists: float,
+    shots: float,
+    blocks: float
+) -> float:
+    """
+    Computes actual Real Rating based on completed match boxscore events:
+    - 0 points (only shots/blocks): 0.0 - 0.9.
+    - 1 Assist: ~1.0 - 1.3.
+    - 1 Goal: ~2.5 - 3.5.
+    - Multi-point games (2+ points): ~3.7 - 5.2.
+    - Star multi-point performances: 8.0+.
+    """
+    pts = goals + assists
+    if pts == 0:
+        raw = shots * 0.16 + blocks * 0.45
+        return round(min(1.0, max(0.0, raw)), 1)
+
+    base = 0.0
+    if goals >= 1:
+        base += 2.5
+    if goals >= 2:
+        base += 1.8 * (goals - 1)
+
+    if assists >= 1:
+        base += 1.0
+    if assists >= 2:
+        base += 0.9 * (assists - 1)
+
+    if pts >= 2:
+        base += 0.4 * (pts - 1)
+
+    base += shots * 0.16 + blocks * 0.30
+    return round(min(10.0, max(0.0, base)), 1)
 
 
 def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: int = 30):
