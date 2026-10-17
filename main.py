@@ -49,11 +49,18 @@ NHL_TEAM_NAMES = {
 }
 
 
-def print_quant_banner():
-    print(
-        "  ██████╗ ██████╗ ███████╗   RRS ENGINE v2.0\n"
-        "  ██╔══██╗██╔══██╗██╔════╝   NHL Quant Draft Optimizer • Real Rating System\n"
+def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str = ""):
+    sub = f"Mode: {mode}"
+    if target_date:
+        sub += f" | Date: {target_date}"
+    banner = (
+        r"  ____   ____   ____     RRS ENGINE v2.0" "\n"
+        r" |  _ \ |  _ \ / ___|    NHL Quant Draft Optimizer | Real Rating System" "\n"
+        rf" | |_) || |_) |\___ \    {sub}" "\n"
+        r" |  _ < |  _ <  ___) |" "\n"
+        r" |_| \_\|_| \_\|____/ " "\n"
     )
+    print(banner)
 
 
 def parse_iso_date_arg(val: str) -> str:
@@ -777,7 +784,6 @@ def settle_past_lineups(client: NHLClient, db: Database):
 
 
 def show_history_report(db: Database, target_date: Optional[str] = None):
-    print_quant_banner()
     if target_date:
         details = db.get_history_slate_details(target_date)
         if not details:
@@ -873,8 +879,18 @@ def main():
     parser.add_argument("--history", nargs="?", const="all", default=None, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     args = parser.parse_args()
 
-    if not args.history:
-        print_quant_banner()
+    if args.sync:
+        mode_label = "Sync Roster & Boosters"
+    elif args.train:
+        mode_label = "Model Validation & Backtest"
+    elif args.history is not None:
+        mode_label = "Performance Tracking & History"
+    elif args.stack:
+        mode_label = "Tournament Stack Optimizer"
+    else:
+        mode_label = "Optimal Draft & Stacking"
+
+    print_quant_banner(mode=mode_label, target_date=args.date)
 
     db = Database()
     client = NHLClient(db=db)

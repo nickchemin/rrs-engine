@@ -38,7 +38,8 @@ from main import (
     solve_stacked_lineup,
     assign_slots,
     print_lineup_table,
-    settle_past_lineups
+    settle_past_lineups,
+    print_quant_banner
 )
 
 
@@ -268,6 +269,17 @@ class TestOptimizer(unittest.TestCase):
         assigned, score = assign_slots(players)
         self.assertEqual(assigned[0]["stack"], "[CAR x3]")
         self.assertEqual(assigned[3]["stack"], "[NYR Pair]")
+
+    def test_print_quant_banner_output(self):
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
+        out = buf.getvalue()
+        self.assertIn("RRS ENGINE v2.0", out)
+        self.assertIn("Mode: Sync Roster & Boosters", out)
+        self.assertIn("Date: 2026-10-17", out)
+        self.assertIn("____", out)
 
 
 class TestDatabaseAndHistory(unittest.TestCase):
