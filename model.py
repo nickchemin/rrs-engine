@@ -58,6 +58,10 @@ class PerformancePredictor:
         self.trained = False
         self.baseline: Dict[str, float] = {}
 
+    @property
+    def is_trained(self) -> bool:
+        return self.trained
+
     def _extract_dataset(
         self,
         game_logs: List[Dict[str, Any]],

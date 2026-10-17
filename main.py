@@ -1116,7 +1116,7 @@ def main():
         if train_logs:
             predictor = PerformancePredictor()
             predictor.train(train_logs, standings)
-            if predictor.is_trained:
+            if predictor.trained:
                 pred = predictor.predict(
                     game_logs=train_logs,
                     is_home=s["is_home"],
