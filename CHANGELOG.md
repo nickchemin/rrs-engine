@@ -2,6 +2,29 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.2.1] - 2026-10-18
+
+### Added
+- **Bayesian Shrinkage for Low-GP Projections**: Implemented Bayesian regression shrinkage in `PerformancePredictor.predict` and baseline slate collection for skaters with $gp < 10$: $(stat \cdot gp + pos\_avg \cdot 10) / (gp + 10)$. Skaters with $gp = 0$ receive positional baseline averages, eliminating inflated small-sample forecasts for call-ups and allowing debutants with boosters to be drafted.
+- **Robust Settle Fallback for Missing Boxscores**: In `settle_past_lineups`, matches older than 3 days whose Gamecenter boxscore protocol remains unavailable or empty are settled using official stats from the player's game log rather than remaining pending forever.
+- **Automatic Missing Season Ingestion**: In `nhl_api.get_player_game_logs`, if a player's latest cached log predates the current season (prior to `YYYY-09-01`), all intervening and missing seasons are concurrently fetched and persisted to the database.
+- **Activation Hints for Commented Boosters**: `load_boosters_file` now detects non-zero booster assignments in `# [DEPTH]` and `# [DTD]` commented lines, emitting an actionable console hint reminding users to remove `#` to activate the player.
+- **Cross-Version Python Typing Fix**: Explicitly imported `Tuple` in `db.py`, ensuring backwards compatibility without `NameError` on Python 3.12 and 3.13 where PEP 649 deferred annotation evaluation is unavailable.
+- **59-Test Offline Test Suite**: Added `TestQAThirdReview` covering all edge cases across Blocks A and B with real function invocations (`is_slate_started`, `build_skater_projection`, `collect_slate_skaters`, `sync_boosters_to_db`).
+
+### Changed
+- **Flexible Booster Value Parsing**: `parse_booster_val` now supports European comma decimal separators (`1,5`), leading decimals (`.5`), and anchored pattern matching `^\+?(\d*\.?\d+)\s*([x%])?$`. Values $> 5.0$ without explicit unit are converted from percentages ($\div 100$) with a descriptive warning and exact decimal representation (e.g. `10.5` $\to$ `0.105`).
+- **Out-Status Namesake Disambiguation**: Global duplicate detection in `collect_slate_skaters` runs across the full slate prior to injury exclusion. Players with identical names whose counterparts are Out/IR (e.g., Sebastian Aho CAR vs NYI, Elias Pettersson C vs D) retain their position tag in `save_boosters_file`, preventing accidental ambiguity warnings on reload.
+- **Multi-Date Goalie Cache Partitioning**: Migrated the `goalies` table to a composite primary key `(team, game_date)` with an automatic table migration, preventing next-day syncs from overwriting current-day goalie data.
+- **Booster Sync Safety Guard**: `sync_boosters_to_db` now guards against empty inputs, preventing schedule misses or empty slates from purging previously stored player boosters in SQLite.
+- **Pettersson Position Tag Preservation**: `normalize_booster_name` now respects specified parentheses position tags (e.g., `Elias Pettersson (D, VAN)`) instead of defaulting to Center.
+- **Precise Booster Multiplier Formatting**: `save_boosters_file` outputs numbers using `:g` (e.g., `0.25`) to prevent loss of precision from fixed decimal truncation.
+- **Depth Player TOI Formatting**: Time on ice formatting now utilizes `divmod(round(avg_toi * 60), 60)`, avoiding edge-case `12:60` outputs.
+- **CLI Argument Date Normalization**: `parse_iso_date_arg` and `parse_history_arg` reformat input dates to strict `YYYY-MM-DD` (`2026-10-1` $\to$ `2026-10-01`).
+- **Safe Injury Upserts**: `save_injuries` uses `INSERT OR REPLACE` to avoid `IntegrityError` on duplicate records, and empties the local cache when ESPN reports zero injuries.
+- **Past-Date Backtest Leakage Prevention**: In `build_skater_projection`, rookie projections on historical dates without past game logs return `(0.0, 0.0)` rather than leaking full-season club aggregates.
+- **Banner and CLI Versioning**: Updated CLI banner and argparse description to `v2.2`.
+
 ## [2.2.0] - 2026-10-18
 
 ### Added
