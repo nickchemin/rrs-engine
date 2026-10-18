@@ -153,8 +153,9 @@ class NHLClient:
         if not force and self.db.has_game_logs(player_id):
             cached_logs = self.db.get_game_logs(player_id)
             latest_date = cached_logs[-1].get("gameDate", "") if cached_logs else ""
-            cutoff_date = f"{current_season_start_year() - 1}-09-01"
-            if latest_date >= cutoff_date:
+            curr_start = current_season_start_year()
+            curr_season_start = f"{curr_start}-09-01"
+            if latest_date >= curr_season_start:
                 # Fast check: sync newly completed games from the current season
                 try:
                     url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
@@ -174,6 +175,23 @@ class NHLClient:
                                 self.db.save_game_logs(player_id, valid_logs)
                 except Exception:
                     pass
+                return self.db.get_game_logs(player_id)
+            elif latest_date:
+                # Latest log is before start of current season: fetch all missing seasons after it
+                try:
+                    last_season_start = int(season_from_date(latest_date)[:4])
+                except Exception:
+                    last_season_start = curr_start - 1
+                missing_seasons = [f"{y}{y+1}" for y in range(last_season_start, curr_start + 1)]
+                all_logs = []
+                with ThreadPoolExecutor(max_workers=min(max(len(missing_seasons), 1), 4)) as executor:
+                    future_to_season = {executor.submit(self._fetch_game_log, player_id, s): s for s in missing_seasons}
+                    for future in as_completed(future_to_season):
+                        logs = future.result()
+                        if logs:
+                            all_logs.extend(logs)
+                if all_logs:
+                    self.db.save_game_logs(player_id, all_logs)
                 return self.db.get_game_logs(player_id)
 
         # Check legacy .cache folder if present - only if DB has no logs
@@ -354,8 +372,7 @@ class NHLClient:
                             "status": status,
                             "detail": detail
                         }
-                if injuries_list:
-                    self.db.save_injuries(injuries_list)
+                self.db.save_injuries(injuries_list)
         except Exception as e:
             print(f"Failed to fetch injury report: {e}")
 

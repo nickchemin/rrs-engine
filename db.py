@@ -2,7 +2,7 @@ import sqlite3
 import os
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
 
@@ -105,13 +105,14 @@ class Database:
                 );
 
                 CREATE TABLE IF NOT EXISTS goalies (
-                    team TEXT PRIMARY KEY,
+                    team TEXT NOT NULL,
                     game_date TEXT NOT NULL DEFAULT '',
                     goalie_name TEXT NOT NULL,
                     status TEXT NOT NULL,
                     save_pct REAL NOT NULL,
                     gaa REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (team, game_date)
                 );
 
                 CREATE TABLE IF NOT EXISTS lineup_history (
@@ -195,11 +196,32 @@ class Database:
                         )
                     """)
 
-            # Schema migration for goalies game_date column
+            # Schema migration for goalies composite primary key (team, game_date)
             cur.execute("PRAGMA table_info(goalies)")
-            g_cols = [c["name"] for c in cur.fetchall()]
-            if g_cols and "game_date" not in g_cols:
-                cur.execute("ALTER TABLE goalies ADD COLUMN game_date TEXT DEFAULT ''")
+            g_info = cur.fetchall()
+            if g_info:
+                pk_cols = [c["name"] for c in g_info if c["pk"] > 0]
+                if pk_cols != ["team", "game_date"]:
+                    col_names = [c["name"] for c in g_info]
+                    date_expr = "COALESCE(game_date, '')" if "game_date" in col_names else "''"
+                    cur.execute("""
+                        CREATE TABLE goalies_new (
+                            team TEXT NOT NULL,
+                            game_date TEXT NOT NULL DEFAULT '',
+                            goalie_name TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            save_pct REAL NOT NULL,
+                            gaa REAL NOT NULL,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (team, game_date)
+                        )
+                    """)
+                    cur.execute(f"""
+                        INSERT OR IGNORE INTO goalies_new (team, game_date, goalie_name, status, save_pct, gaa, updated_at)
+                        SELECT team, {date_expr}, goalie_name, status, save_pct, gaa, updated_at FROM goalies
+                    """)
+                    cur.execute("DROP TABLE goalies")
+                    cur.execute("ALTER TABLE goalies_new RENAME TO goalies")
 
             conn.commit()
 
@@ -479,7 +501,7 @@ class Database:
             cur.execute("DELETE FROM injuries")
             for item in injuries:
                 cur.execute("""
-                    INSERT INTO injuries (player_name, team, status, detail, updated_at)
+                    INSERT OR REPLACE INTO injuries (player_name, team, status, detail, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                 """, (
                     item.get("name", ""),
@@ -544,8 +566,7 @@ class Database:
                 cur.execute("""
                     INSERT INTO goalies (team, game_date, goalie_name, status, save_pct, gaa, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(team) DO UPDATE SET
-                        game_date=excluded.game_date,
+                    ON CONFLICT(team, game_date) DO UPDATE SET
                         goalie_name=excluded.goalie_name,
                         status=excluded.status,
                         save_pct=excluded.save_pct,

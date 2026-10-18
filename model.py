@@ -51,6 +51,12 @@ class RidgeRegression:
         return Z @ self.coef_ + self.intercept_
 
 
+POS_AVERAGES: Dict[str, Dict[str, float]] = {
+    "D": {"goals": 0.09, "assists": 0.28, "shots": 1.5, "toi": 19.5},
+    "F": {"goals": 0.22, "assists": 0.32, "shots": 1.9, "toi": 15.5},
+}
+
+
 class PerformancePredictor:
     def __init__(self):
         self.multi_model: Optional[RidgeRegression] = None
@@ -164,8 +170,22 @@ class PerformancePredictor:
         position: str = "F",
         goalie_factor: float = 1.0
     ) -> Dict[str, Any]:
+        pos_key = "D" if str(position).upper() in ("D", "DEF") else "F"
+        pos_avg = POS_AVERAGES[pos_key]
+        opp_info = standings.get(opponent_abbrev, {})
+        opp_def = float(opp_info.get("defense_factor", 1.0))
+        home_boost = 1.05 if is_home else 0.95
+
         if not game_logs:
-            preds = dict(self.baseline)
+            preds = {
+                "goals": max(0.0, pos_avg["goals"] * opp_def * home_boost),
+                "assists": max(0.0, pos_avg["assists"] * opp_def * home_boost),
+                "shots": max(0.0, pos_avg["shots"] * opp_def * home_boost),
+                "toi": max(5.0, pos_avg["toi"])
+            }
+            if goalie_factor != 1.0:
+                preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
+                preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
         else:
             parsed = [{
                 "date": g.get("gameDate", "2020-01-01"),
@@ -182,9 +202,6 @@ class PerformancePredictor:
                 rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
             except Exception:
                 rest = 2.0
-
-            opp_info = standings.get(opponent_abbrev, {})
-            opp_def = float(opp_info.get("defense_factor", 1.0))
 
             last5 = parsed[-5:] if len(parsed) >= 5 else parsed
             last20 = parsed[-20:] if len(parsed) >= 20 else parsed
@@ -215,15 +232,25 @@ class PerformancePredictor:
                 preds["shots"] = max(0.0, float(raw_preds[2]))
                 preds["toi"] = max(0.0, float(raw_preds[3]))
             else:
-                home_boost = 1.05 if is_home else 0.95
+                gp = len(parsed)
+                k = 10.0
                 r5_g = np.mean([x["goals"] for x in last5])
                 r5_a = np.mean([x["assists"] for x in last5])
                 r5_s = np.mean([x["shots"] for x in last5])
                 r5_toi = np.mean([x["toi"] for x in last5])
-                preds["goals"] = max(0.0, r5_g * opp_def * home_boost)
-                preds["assists"] = max(0.0, r5_a * opp_def * home_boost)
-                preds["shots"] = max(0.0, r5_s * opp_def * home_boost)
-                preds["toi"] = max(5.0, r5_toi)
+
+                if gp < 10:
+                    adj_g = (r5_g * gp + pos_avg["goals"] * k) / (gp + k)
+                    adj_a = (r5_a * gp + pos_avg["assists"] * k) / (gp + k)
+                    adj_s = (r5_s * gp + pos_avg["shots"] * k) / (gp + k)
+                    adj_toi = (r5_toi * gp + pos_avg["toi"] * k) / (gp + k)
+                else:
+                    adj_g, adj_a, adj_s, adj_toi = r5_g, r5_a, r5_s, r5_toi
+
+                preds["goals"] = max(0.0, adj_g * opp_def * home_boost)
+                preds["assists"] = max(0.0, adj_a * opp_def * home_boost)
+                preds["shots"] = max(0.0, adj_s * opp_def * home_boost)
+                preds["toi"] = max(5.0, adj_toi)
 
             if goalie_factor != 1.0:
                 preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
@@ -234,8 +261,7 @@ class PerformancePredictor:
         blocked = round(preds["toi"] * blk_rate, 2)
         points = round(preds["goals"] + preds["assists"], 2)
 
-        toi_min = int(preds["toi"])
-        toi_sec = int((preds["toi"] - toi_min) * 60)
+        toi_min, toi_sec = divmod(round(preds["toi"] * 60), 60)
         formatted_toi = f"{toi_min:02d}:{toi_sec:02d}"
 
         # RRS (Real Rating System) calibrated projection:

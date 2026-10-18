@@ -36,6 +36,10 @@ from main import (
     get_player_booster,
     load_boosters_file,
     save_boosters_file,
+    sync_boosters_to_db,
+    collect_slate_skaters,
+    is_slate_started,
+    build_skater_projection,
     match_injury,
     solve_optimal_lineup,
     solve_stacked_lineup,
@@ -103,19 +107,35 @@ class TestBoosterManagement(unittest.TestCase):
         self.assertAlmostEqual(parse_booster_val(""), 0.0)
 
     def test_parse_booster_val_rules(self):
-        # Point 8: % always divided by 100
+        # % always divided by 100
         self.assertAlmostEqual(parse_booster_val("10%"), 0.10)
         self.assertAlmostEqual(parse_booster_val("+150%"), 1.50)
-        # Multipliers as-is
+        # Multipliers <= 5.0 as-is
         self.assertAlmostEqual(parse_booster_val("0.8"), 0.8)
         self.assertAlmostEqual(parse_booster_val("1.4x"), 1.4)
         self.assertAlmostEqual(parse_booster_val("+0.3"), 0.3)
-        # Value > 5.0 prints warning
+        # Number without x or % > 5.0 divided by 100 with warning
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            val = parse_booster_val("8.0")
-        self.assertAlmostEqual(val, 8.0)
-        self.assertIn("looks like a percentage", buf.getvalue())
+            val80 = parse_booster_val("80")
+        self.assertAlmostEqual(val80, 0.80)
+        self.assertIn("0.8", buf.getvalue())
+        # Multiplier with x > 5.0 keeps multiplier with warning
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val8x = parse_booster_val("8x")
+        self.assertAlmostEqual(val8x, 8.0)
+        self.assertIn("large booster multiplier 8x", buf.getvalue())
+        # Comma replaced with dot and .5 supported
+        self.assertAlmostEqual(parse_booster_val("1,5"), 1.5)
+        self.assertAlmostEqual(parse_booster_val("0,8"), 0.8)
+        self.assertAlmostEqual(parse_booster_val(".5"), 0.5)
+        # Warning for 10.5 contains 0.105
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val105 = parse_booster_val("10.5")
+        self.assertAlmostEqual(val105, 0.105)
+        self.assertIn("0.105", buf.getvalue())
         # Unparsable prints warning with line number and returns 0.0
         buf = io.StringIO()
         with patch("sys.stdout", buf):
@@ -128,7 +148,9 @@ class TestBoosterManagement(unittest.TestCase):
         self.assertEqual(normalize_booster_name("Elias Pettersson #25"), "elias pettersson (D)")
         self.assertEqual(normalize_booster_name("Elias Pettersson (C)"), "elias pettersson (C)")
         self.assertEqual(normalize_booster_name("Elias Pettersson"), "elias pettersson (C)")
-        self.assertEqual(normalize_booster_name("Elias Pettersson (F)"), "elias pettersson (C)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (F)"), "elias pettersson (F)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (D, VAN)"), "elias pettersson (D, VAN)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (C, VAN)"), "elias pettersson (C, VAN)")
         self.assertEqual(normalize_booster_name("[DTD] Cale Makar (DEF)"), "cale makar (D)")
         self.assertEqual(normalize_booster_name("[DEPTH] Matt Rempe (F)"), "matt rempe (F)")
         self.assertEqual(normalize_booster_name("Tim Stützle (C)"), "tim stutzle (C)")
@@ -285,13 +307,9 @@ class TestGoaliesAndInjuries(unittest.TestCase):
     def test_goalie_factor_in_prediction(self):
         pred = PerformancePredictor()
         mock_model = MagicMock()
-        mock_model.predict.return_value = [1.0]
-        pred.models = {
-            "goals": mock_model,
-            "assists": mock_model,
-            "shots": mock_model,
-            "toi": mock_model
-        }
+        mock_model.predict.return_value = [[0.5, 0.5, 3.0, 18.0]]
+        pred.multi_model = mock_model
+        pred.trained = True
         res_weak_goalie = pred.predict(
             game_logs=[{"toi": "18:00", "goals": 1, "assists": 1, "shots": 3, "gameDate": "2026-01-01"}],
             is_home=True,
@@ -315,16 +333,27 @@ class TestGoaliesAndInjuries(unittest.TestCase):
         self.assertEqual(res_weak_goalie["xSOG"], res_normal_goalie["xSOG"])
 
     def test_prediction_train_logs_only(self):
-        # Point 6: Verify predict only trains and evaluates on logs < game_date
+        # Point 17: Verify build_skater_projection calls real function and ignores logs >= game_date
         slate_date = "2026-03-10"
-        all_logs = [
-            {"gameDate": "2026-03-01", "goals": 1, "assists": 0, "shots": 2, "toi": "18:00"},
-            {"gameDate": "2026-03-05", "goals": 0, "assists": 1, "shots": 3, "toi": "19:00"},
-            {"gameDate": "2026-03-10", "goals": 3, "assists": 2, "shots": 6, "toi": "22:00"}  # Slate match
+        logs = [
+            {"gameDate": "2026-03-01", "goals": 0, "assists": 0, "shots": 1, "toi": "15:00"},
+            {"gameDate": "2026-03-05", "goals": 0, "assists": 0, "shots": 1, "toi": "15:00"},
+            {"gameDate": "2026-03-10", "goals": 50, "assists": 50, "shots": 50, "toi": "25:00"}  # Same day match: MUST BE EXCLUDED
         ]
-        train_logs = [l for l in all_logs if l.get("gameDate", "") < slate_date]
-        self.assertEqual(len(train_logs), 2)
-        self.assertNotIn("2026-03-10", [l["gameDate"] for l in train_logs])
+        skater = {
+            "id": 1,
+            "name": "Test Skater",
+            "pos": "F",
+            "opp": "MTL",
+            "is_home": True,
+            "goalie_factor": 1.0,
+            "xRRS": 1.5,
+            "base_pts": 1.5
+        }
+        standings = {"MTL": {"defense_factor": 1.0}}
+        proj_xrrs, _ = build_skater_projection(skater, logs, standings, game_date=slate_date, today_str=slate_date)
+        # Excludes 50-goal match, staying well under 10.0 xRRS
+        self.assertLess(proj_xrrs, 10.0)
 
     def test_xrrs_projection_peripheral_weights(self):
         # Point 12: xsog * 0.25 + xblk * 0.50
@@ -446,13 +475,13 @@ class TestLineupOptimizer(unittest.TestCase):
         with patch("sys.stdout", buf):
             print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
         out = buf.getvalue()
-        self.assertIn("RRS ENGINE v2.0", out)
+        self.assertIn("RRS ENGINE v2.2", out)
         self.assertIn("Mode: Sync Roster & Boosters", out)
         self.assertIn("Date: 2026-10-17", out)
         self.assertIn("____", out)
 
     def test_rookie_without_train_logs_fallback(self):
-        # Point 9: Skater with no prior games receives fallback xRRS and is not skipped
+        # Point 17: Skater with no prior games calls real build_skater_projection
         skater = {
             "id": 99999,
             "name": "Rookie Phenom",
@@ -466,12 +495,18 @@ class TestLineupOptimizer(unittest.TestCase):
             "opp": "ANA",
             "opp_goalie": ""
         }
-        train_logs = []
-        if train_logs:
-            xrrs = 0.0
-        else:
-            xrrs = skater.get("xRRS", 0.0)
+        xrrs, base = build_skater_projection(
+            skater, logs=[], standings={}, game_date="2099-01-01", today_str="2099-01-01"
+        )
         self.assertEqual(xrrs, 3.45)
+        self.assertEqual(base, 3.45)
+
+        # Point 15: For a past slate, rookie fallback does not leak future data
+        xrrs_past, base_past = build_skater_projection(
+            skater, logs=[], standings={}, game_date="2020-01-01", today_str="2026-10-18"
+        )
+        self.assertEqual(xrrs_past, 0.0)
+        self.assertEqual(base_past, 0.0)
 
 
 class TestDatabaseAndHistory(unittest.TestCase):
@@ -571,21 +606,22 @@ class TestDatabaseAndHistory(unittest.TestCase):
         self.assertNotEqual(details[0]["actual_toi"], "DNP")
 
     def test_settle_past_lineups_empty_boxscore_skips(self):
-        # Point 3: If game has gameId but boxscore is empty, skip record until next run
+        # Point 3: If game has gameId but boxscore is empty and match < 3 days old, skip record until next run
+        yesterday_str = (datetime.strptime(nhl_today(), "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
         lineup = [
             {"id": 303, "name": "Waiting Player", "team": "TOR", "opp": "vsMTL", "slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "xRRS": 3.0, "score": 6.0, "booster": 0.0}
         ]
         self.db.save_player(303, "Waiting Player", "TOR", "F")
-        self.db.save_lineup_history("2026-03-01", "standard", lineup)
+        self.db.save_lineup_history(yesterday_str, "standard", lineup)
 
         client = MagicMock()
         client.get_player_current_game_logs.return_value = [
-            {"gameDate": "2026-03-01", "goals": 1, "assists": 0, "shots": 2, "gameId": 8888}
+            {"gameDate": yesterday_str, "goals": 1, "assists": 0, "shots": 2, "gameId": 8888}
         ]
         client.get_boxscore_skaters.return_value = {}  # Network error / protocol unavailable
 
         settle_past_lineups(client, self.db)
-        details = self.db.get_history_slate_details("2026-03-01")
+        details = self.db.get_history_slate_details(yesterday_str)
         self.assertEqual(len(details), 1)
         # Record must remain unsettled
         self.assertEqual(details[0]["settled"], 0)
@@ -602,7 +638,7 @@ class TestDatabaseAndHistory(unittest.TestCase):
         settle_past_lineups(client, self.db)
 
     def test_slate_started_time_utc(self):
-        # Point 1: startTimeUTC check
+        # Point 17: Call real is_slate_started function
         now = datetime.now(timezone.utc)
         past_time = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         future_time = (now + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -610,17 +646,9 @@ class TestDatabaseAndHistory(unittest.TestCase):
         started_games = [{"startTimeUTC": past_time, "gameState": "FUT"}]
         upcoming_games = [{"startTimeUTC": future_time, "gameState": "FUT"}]
 
-        is_started = any(
-            datetime.fromisoformat(g["startTimeUTC"].replace("Z", "+00:00")) <= now
-            for g in started_games
-        )
-        self.assertTrue(is_started)
-
-        is_upcoming = any(
-            datetime.fromisoformat(g["startTimeUTC"].replace("Z", "+00:00")) <= now
-            for g in upcoming_games
-        )
-        self.assertFalse(is_upcoming)
+        today_str = nhl_today()
+        self.assertTrue(is_slate_started(started_games, game_date=today_str, today_str=today_str))
+        self.assertFalse(is_slate_started(upcoming_games, game_date=today_str, today_str=today_str))
 
     def test_injuries_composite_pk_and_atomic_replace(self):
         # Point 7: Composite primary key (player_name, team) and atomic replace
@@ -794,6 +822,228 @@ class TestNHLClient(unittest.TestCase):
 
             self.assertNotIn(8478402, buf_pids)
             self.assertIn(8478402, vgk_pids)
+
+
+class TestQAThirdReview(unittest.TestCase):
+    def setUp(self):
+        self.temp_db_fd, self.temp_db_path = tempfile.mkstemp(suffix=".db")
+        os.close(self.temp_db_fd)
+        self.db = Database(self.temp_db_path)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db_path):
+            try:
+                os.remove(self.temp_db_path)
+            except Exception:
+                pass
+
+    # Point 1: Tuple typing import in db.py
+    def test_point_1_tuple_typing_import(self):
+        import db as db_module
+        import typing
+        self.assertIn("Tuple", db_module.__dict__)
+        hints = typing.get_type_hints(db_module.Database.get_injuries)
+        self.assertIn("return", hints)
+
+    # Point 2: parse_booster_val rules (>5 divided by 100, x kept, comma to dot, .5)
+    def test_point_2_parse_booster_val(self):
+        # Number without x or % > 5.0 divided by 100 with warning
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val80 = parse_booster_val("80")
+        self.assertAlmostEqual(val80, 0.8)
+        self.assertIn("0.8", buf.getvalue())
+
+        # Multiplier with x kept
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val8x = parse_booster_val("8x")
+        self.assertAlmostEqual(val8x, 8.0)
+        self.assertIn("large booster multiplier 8x", buf.getvalue())
+
+        # Comma replaced with dot and .5 supported
+        self.assertAlmostEqual(parse_booster_val("1,5"), 1.5)
+        self.assertAlmostEqual(parse_booster_val("0,8"), 0.8)
+        self.assertAlmostEqual(parse_booster_val(".5"), 0.5)
+
+        # 10.5 gives 0.105 in warning
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val105 = parse_booster_val("10.5")
+        self.assertAlmostEqual(val105, 0.105)
+        self.assertIn("0.105", buf.getvalue())
+
+    # Point 3: Duplicate name with one Out player preserves position tag in boosters file
+    def test_point_3_duplicate_name_with_out_status(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            client = MagicMock()
+            client.get_all_club_stats.return_value = {
+                "CAR": [{"playerId": 101, "firstName": {"default": "Sebastian"}, "lastName": {"default": "Aho"}, "positionCode": "F", "gamesPlayed": 40, "avgTimeOnIcePerGame": 1200}],
+                "NYI": [{"playerId": 102, "firstName": {"default": "Sebastian"}, "lastName": {"default": "Aho"}, "positionCode": "D", "gamesPlayed": 40, "avgTimeOnIcePerGame": 1200}]
+            }
+            team_matchups = {"CAR": ("NYI", True), "NYI": ("CAR", False)}
+            goalies = {"CAR": {}, "NYI": {}}
+            injuries = {("Sebastian Aho", "NYI"): {"name": "Sebastian Aho", "team": "NYI", "status": "Out"}}
+            boosters = {}
+            active, dtd, depth, excluded, _, _ = collect_slate_skaters(
+                client, self.db, team_matchups, goalies, injuries, boosters
+            )
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["name"], "Sebastian Aho")
+            self.assertTrue(active[0]["is_dup"])
+
+            save_boosters_file(boosters, active, path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Sebastian Aho (F)", content)
+
+            # Test that resolve_booster finds it
+            test_boosters = {"sebastian aho (F)": 1.5}
+            val, key = resolve_booster(test_boosters, "Sebastian Aho", pos="F", team="CAR", is_duplicate=True)
+            self.assertEqual(val, 1.5)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point 4: Bayesian shrinkage for small games played
+    def test_point_4_bayesian_shrinkage(self):
+        pred = PerformancePredictor()
+        # 1 match rookie (1 goal, 3 shots, 0 assists, 15 min TOI)
+        logs = [{"goals": 1, "assists": 0, "shots": 3, "toi": "15:00", "gameDate": "2026-01-01"}]
+        res_1g = pred.predict(logs, is_home=True, opponent_abbrev="MTL", game_date="2026-01-05", standings={"MTL": {"defense_factor": 1.0}}, position="F")
+        # Shrunk from superstar 3.92 down to ~2.20
+        self.assertLess(res_1g["xRRS"], 3.0)
+        self.assertGreater(res_1g["xRRS"], 1.5)
+
+        # 0 games rookie
+        res_0g = pred.predict([], is_home=True, opponent_abbrev="MTL", game_date="2026-01-05", standings={"MTL": {"defense_factor": 1.0}}, position="F")
+        self.assertGreater(res_0g["xRRS"], 1.5)
+
+    # Point 5: sync_boosters_to_db does not delete DB if boosters empty
+    def test_point_5_sync_boosters_to_db_empty_guard(self):
+        self.db.set_booster("connor mcdavid", 1.5)
+        sync_boosters_to_db(self.db, {})
+        self.assertEqual(self.db.get_all_boosters().get("connor mcdavid"), 1.5)
+
+    # Point 6: Goalie cache with composite PRIMARY KEY (team, game_date)
+    def test_point_6_goalies_composite_pk(self):
+        self.db.save_starting_goalies({"EDM": {"goalie_name": "Stuart Skinner", "save_pct": 0.910, "gaa": 2.50}}, game_date="2026-10-18")
+        self.db.save_starting_goalies({"EDM": {"goalie_name": "Calvin Pickard", "save_pct": 0.900, "gaa": 2.80}}, game_date="2026-10-19")
+        g18 = self.db.get_starting_goalies(game_date="2026-10-18")
+        g19 = self.db.get_starting_goalies(game_date="2026-10-19")
+        self.assertIsNotNone(g18)
+        self.assertIsNotNone(g19)
+        self.assertEqual(g18["EDM"]["goalie_name"], "Stuart Skinner")
+        self.assertEqual(g19["EDM"]["goalie_name"], "Calvin Pickard")
+
+    # Point 7: Settle past lineups falls back to game log if match >= 3 days old and boxscore empty
+    def test_point_7_settle_past_lineups_old_match_fallback(self):
+        old_date = (datetime.strptime(nhl_today(), "%Y-%m-%d") - timedelta(days=5)).strftime("%Y-%m-%d")
+        lineup = [{"id": 505, "name": "Veteran Player", "team": "EDM", "opp": "vsCGY", "slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "xRRS": 3.0, "score": 6.0, "booster": 0.0}]
+        self.db.save_player(505, "Veteran Player", "EDM", "F")
+        self.db.save_lineup_history(old_date, "standard", lineup)
+        client = MagicMock()
+        client.get_player_current_game_logs.return_value = [
+            {"gameDate": old_date, "goals": 2, "assists": 1, "shots": 4, "toi": "20:00", "gameId": 7777}
+        ]
+        client.get_boxscore_skaters.return_value = {}  # Empty boxscore
+        settle_past_lineups(client, self.db)
+        details = self.db.get_history_slate_details(old_date)
+        self.assertEqual(details[0]["settled"], 1)
+        self.assertEqual(details[0]["actual_goals"], 2.0)
+        self.assertEqual(details[0]["actual_assists"], 1.0)
+
+    # Point 8: get_player_game_logs loads missing seasons if latest log is before current season
+    def test_point_8_get_player_game_logs_missing_seasons(self):
+        self.db.save_game_logs(888, [{"gameId": 1, "gameDate": "2025-11-15", "goals": 1, "assists": 0, "shots": 2, "toi": "15:00", "seasonId": "20252026"}])
+        client = NHLClient(db=self.db)
+        fetched_seasons = []
+        def mock_fetch(p_id, s):
+            fetched_seasons.append(s)
+            return [{"gameId": 2, "gameDate": "2026-01-15", "goals": 0, "assists": 1, "shots": 3, "toi": "16:00", "seasonId": s}]
+        client._fetch_game_log = mock_fetch
+        logs = client.get_player_game_logs(888)
+        self.assertIn("20252026", fetched_seasons)
+        self.assertGreater(len(logs), 1)
+
+    # Point 9: normalize_booster_name respects specified position tag for Pettersson
+    def test_point_9_normalize_booster_name_pettersson(self):
+        self.assertEqual(normalize_booster_name("Elias Pettersson (D, VAN)"), "elias pettersson (D, VAN)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (C, VAN)"), "elias pettersson (C, VAN)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (D)"), "elias pettersson (D)")
+        self.assertEqual(normalize_booster_name("Elias Pettersson (F)"), "elias pettersson (F)")
+
+    # Point 10: save_boosters_file formats boosters with :g
+    def test_point_10_save_boosters_file_g_format(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            active = [{"id": 1, "name": "Connor McDavid", "team": "EDM", "pos": "C", "xRRS": 4.5}]
+            boosters = {"connor mcdavid (C)": 0.25, "connor mcdavid": 0.25}
+            save_boosters_file(boosters, active, path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("0.25", content)
+            self.assertNotIn("0.2 ", content)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point 11: save_injuries INSERT OR REPLACE and clearing on empty ESPN response
+    def test_point_11_save_injuries_replace_and_clear_on_empty(self):
+        dupe_injuries = [
+            {"name": "No Team Guy", "team": "", "status": "Out"},
+            {"name": "No Team Guy", "team": "", "status": "Out"}
+        ]
+        self.db.save_injuries(dupe_injuries)
+        self.assertIsNotNone(self.db.get_injuries())
+
+        client = NHLClient(db=self.db)
+        mock_res = MagicMock()
+        mock_res.status_code = 200
+        mock_res.json.return_value = {"injuries": []}
+        client.session.get = MagicMock(return_value=mock_res)
+        client.get_injuries(force=True)
+        self.assertIsNone(self.db.get_injuries())
+
+    # Point 12: Depth player TOI divmod formatting
+    def test_point_12_depth_toi_divmod(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            depth = [{"name": "Depth Guy", "team": "ANA", "pos": "D", "avg_toi": 12.999}]
+            save_boosters_file({}, [], depth_players=depth, path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("13:00", content)
+            self.assertNotIn("12:60", content)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point 13: parse_iso_date_arg and parse_history_arg format normalization
+    def test_point_13_date_normalization(self):
+        self.assertEqual(parse_iso_date_arg("2026-10-1"), "2026-10-01")
+        self.assertEqual(parse_history_arg("2026-10-1"), "2026-10-01")
+
+    # Point 14: load_boosters_file hints on edited commented line
+    def test_point_14_load_boosters_file_commented_hint(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# [DEPTH] Drew Helleson = 2.4 # ANA D 12:45\n")
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                boosters = load_boosters_file(path)
+            self.assertEqual(boosters, {})
+            self.assertIn("💡 Hint", buf.getvalue())
+            self.assertIn("Remove '#' to activate", buf.getvalue())
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
 
 
 if __name__ == "__main__":
