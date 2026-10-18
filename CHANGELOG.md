@@ -2,6 +2,26 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.3.0] - 2026-10-18
+
+### Added
+- **Line Combinations & Power Play Deployment (PP1/PP2)**: Scrapes confirmed and projected line combinations and power play units from Daily Faceoff (`/teams/{slug}/line-combinations`) concurrently in parallel across all slate teams.
+- **Role Factor Model Integration**: `compute_line_factor` modulates projected goals, assists, and ice time:
+  - `PP1`: +12% goals, +18% assists, +1.5 min TOI.
+  - `PP2`: +4% goals, +5% assists, +0.5 min TOI.
+  - No PP (when EV line is confirmed): -8% goals, -12% assists, -0.5 min TOI.
+  - EV Lines: `L1`/`D1` boost, `L3`/`L4`/`D3` realistic workload deflation.
+- **Correlated Line & Power Play Stacking**: `solve_stacked_lineup` searches all candidate combinations per team and evaluates pairwise correlation:
+  - Both on PP1 & same EV line (`[TEAM L1+PP1]`): +15% synergy.
+  - Both on PP1 (`[TEAM PP1 QB+F]` or `[TEAM PP1]`): +13% synergy.
+  - Same EV top line (`[TEAM L1]`): +10% synergy.
+  - Same PP2 (`[TEAM PP2]`): +8% synergy.
+  - Generic team stack (`[TEAM Pair]`): +6% synergy.
+- **`Line` Column in Terminal Output**: Optimizer lineup tables display each skater's line tag (e.g. `L1/PP1`, `D1/PP1`, `L2/PP2`, `L3`) for immediate visibility.
+- **Line Tags in `boosters.txt`**: Saved booster files append line and power play unit comments (`# L1/PP1`, `# D1/PP1`, `# L3`), accelerating manual multiplier entry.
+- **`team_lines` SQLite Table & Cache**: Persists line combination data per team with a 12-hour TTL and batch lookup (`get_all_lines_for_teams`).
+- **65 Offline Unit Tests**: Expanded test suite from 59 to 65 tests in `TestTeamLinesAndDeployment`, testing line caching, DFO JSON parsing, line multipliers, projection effects, PP1 stack synergy, and terminal table formatting.
+
 ## [2.2.1] - 2026-10-18
 
 ### Added

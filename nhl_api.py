@@ -3,6 +3,7 @@ import json
 import re
 import os
 import threading
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +23,14 @@ def nhl_now() -> datetime:
 
 def nhl_today() -> str:
     return nhl_now().strftime("%Y-%m-%d")
+
+
+def name_key(name: str) -> str:
+    if not name:
+        return ""
+    nk = unicodedata.normalize("NFKD", str(name))
+    ascii_str = "".join(c for c in nk if not unicodedata.combining(c))
+    return " ".join(ascii_str.lower().split())
 
 
 def current_season_start_year() -> int:
@@ -532,6 +541,113 @@ class NHLClient:
         except Exception as e:
             print(f"Failed to fetch boxscore for game {game_id}: {e}")
         return {}
+
+    def get_team_lines(self, team: str, force: bool = False) -> Dict[str, Dict[str, Any]]:
+        if not force:
+            cached = self.db.get_team_lines(team)
+            if cached:
+                return cached
+
+        slug = TEAM_TO_SLUG.get(team)
+        if not slug:
+            return {}
+
+        url = f"https://www.dailyfaceoff.com/teams/{slug}/line-combinations"
+        lines_data: Dict[str, Dict[str, Any]] = {}
+        try:
+            res = self.session.get(url, timeout=10)
+            if res.status_code == 200:
+                m = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', res.text, re.DOTALL)
+                if m:
+                    data = json.loads(m.group(1))
+                    comb = data.get("props", {}).get("pageProps", {}).get("combinations", {})
+                    players = comb.get("players", [])
+                    for p in players:
+                        p_name = p.get("name")
+                        if not p_name:
+                            continue
+                        nk = name_key(p_name)
+                        if nk not in lines_data:
+                            lines_data[nk] = {
+                                "player_name": p_name,
+                                "ev_line": None,
+                                "pp_unit": None,
+                                "pk_unit": None,
+                                "position": (p.get("positionIdentifier") or "").upper()
+                            }
+                        cat = (p.get("categoryIdentifier") or "").lower()
+                        grp = (p.get("groupIdentifier") or "").lower()
+                        if cat == "ev":
+                            if grp in ("f1", "f2", "f3", "f4"):
+                                lines_data[nk]["ev_line"] = grp.replace("f", "L").upper()
+                            elif grp in ("d1", "d2", "d3", "d4"):
+                                lines_data[nk]["ev_line"] = grp.upper()
+                        elif cat == "pp":
+                            if grp in ("pp1", "pp2"):
+                                lines_data[nk]["pp_unit"] = grp.upper()
+                        elif cat == "pk":
+                            if grp in ("pk1", "pk2"):
+                                lines_data[nk]["pk_unit"] = grp.upper()
+                        if p.get("positionIdentifier"):
+                            pos_id = p.get("positionIdentifier").upper()
+                            if not pos_id.startswith("G") and not pos_id.startswith("IR"):
+                                lines_data[nk]["position"] = pos_id
+
+                    if lines_data:
+                        self.db.save_team_lines(team, lines_data)
+        except Exception:
+            pass
+
+        return lines_data
+
+    def prefetch_teams_lines(
+        self,
+        teams: List[str],
+        max_workers: int = 6,
+        force: bool = False
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if not teams:
+            return {}
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        missing_teams: List[str] = []
+
+        if not force:
+            cached_map = self.db.get_all_lines_for_teams(teams)
+            for t in teams:
+                if t in cached_map and cached_map[t]:
+                    result[t] = cached_map[t]
+                else:
+                    missing_teams.append(t)
+        else:
+            missing_teams = list(teams)
+
+        if not missing_teams:
+            return result
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(missing_teams))) as executor:
+            future_to_team = {executor.submit(self.get_team_lines, t, force=force): t for t in missing_teams}
+            for fut in as_completed(future_to_team):
+                t = future_to_team[fut]
+                try:
+                    res = fut.result()
+                    if res:
+                        result[t] = res
+                except Exception:
+                    pass
+
+        return result
+
+
+TEAM_TO_SLUG = {
+    "ANA": "anaheim-ducks", "BOS": "boston-bruins", "BUF": "buffalo-sabres", "CGY": "calgary-flames",
+    "CAR": "carolina-hurricanes", "CHI": "chicago-blackhawks", "COL": "colorado-avalanche", "CBJ": "columbus-blue-jackets",
+    "DAL": "dallas-stars", "DET": "detroit-red-wings", "EDM": "edmonton-oilers", "FLA": "florida-panthers",
+    "LAK": "los-angeles-kings", "MIN": "minnesota-wild", "MTL": "montreal-canadiens", "NSH": "nashville-predators",
+    "NJD": "new-jersey-devils", "NYI": "new-york-islanders", "NYR": "new-york-rangers", "OTT": "ottawa-senators",
+    "PHI": "philadelphia-flyers", "PIT": "pittsburgh-penguins", "SJS": "san-jose-sharks", "SEA": "seattle-kraken",
+    "STL": "st-louis-blues", "TBL": "tampa-bay-lightning", "TOR": "toronto-maple-leafs", "UTA": "utah-hockey-club",
+    "VAN": "vancouver-canucks", "VGK": "vegas-golden-knights", "WSH": "washington-capitals", "WPG": "winnipeg-jets"
+}
 
 
 TEAM_SLUG_MAP = {

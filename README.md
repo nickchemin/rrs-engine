@@ -4,12 +4,13 @@ Quantitative draft optimizer and sports analytics terminal for NHL contests on t
 
 ## Features
 
-- **xRRS Calculation**: Predicts player performance based on historical stats, opponent defense metrics, starting goalie save percentages, and Bayesian shrinkage toward positional averages for small-sample skaters ($gp < 10$).
+- **xRRS Calculation**: Predicts player performance based on historical stats, opponent defense metrics, starting goalie save percentages, line combinations (EV Line 1-4, D1-3), and Power Play deployment (PP1/PP2), with Bayesian shrinkage for small-sample skaters ($gp < 10$).
 - **Exact DP Optimizer**: Evaluates optimal 5-slot lineups using exact $O(5N)$ dynamic programming obeying the rearrangement inequality in $<1$ ms.
+- **Line Deployment Intel**: Scrapes and caches live line combinations and power play units (PP1, PP2, EV Lines) from Daily Faceoff in parallel across all slate teams.
+- **Correlated Teammate Stacks**: Solves for highly correlated combinations (same PP1 unit, PP1 QB + Forward, L1+PP1 linemates) with dynamic synergy multipliers to maximize tournament ceiling.
 - **Starting Goalie Intel**: Scrapes confirmed starting netminders from Daily Faceoff with slate matchup verification, multi-date composite caching, and official NHL API fallback.
-- **Teammate Stacks**: Solves for correlated 2-man and 2+2 combinations with synergy multipliers to maximize tournament ceiling.
 - **Automated Settlement**: Fetches completed match boxscores from NHL Gamecenter (`/boxscore`) to track actual goals, assists, shots, and blocked shots, with automatic DNP handling and resilient game log fallback for games $\ge 3$ days old.
-- **Partitioned Boosters**: Formats `boosters.txt` grouped by team with automatic name deduplication (e.g., Sebastian Aho F vs. D, Elias Pettersson C vs. D), activation hints for depth players, and flexible booster value parsing (supports `80%`, `0.8`, `1,5`, `1.4x`).
+- **Partitioned Boosters**: Formats `boosters.txt` grouped by team with line combination comments (e.g. `# L1/PP1`), automatic name deduplication (e.g., Sebastian Aho F vs. D, Elias Pettersson C vs. D), activation hints for depth players, and flexible booster parsing (supports `80%`, `0.8`, `1,5`, `1.4x`).
 - **NHL Timezone Handling**: Accurately aligns slate dates using America/New_York time across European and Asian timezones.
 - **Out-of-sample ML Validation**: Tests prediction models against a 20-game rolling average baseline.
 
@@ -26,17 +27,18 @@ pip install -r requirements.txt
 ```bash
 python main.py --sync
 ```
-Downloads today's NHL schedule, matches starting goalies, filters injuries, and generates `boosters.txt`.
+Downloads today's NHL schedule, matches starting goalies, synchronizes line combinations, filters injuries, and generates `boosters.txt`.
 
 ### 3. Set Boosters (`boosters.txt`)
-Fill in player multipliers from the Real Sports app (supports percentages, multipliers, and decimals):
+Fill in player multipliers from the Real Sports app (supports percentages, multipliers, and decimals; comments indicate player lines and PP units):
 ```text
-Nathan MacKinnon         = 0.0
-Rickard Rakell           = 2.2x
-Egor Chinakhov           = 80%    # Evaluates to 0.80
-Brent Burns              = 1,5    # Evaluates to 1.50
-Sam Malinski             = .5     # Evaluates to 0.50
-Elias Pettersson (D)     = 0.0
+Nathan MacKinnon         = 0.0  # L1/PP1
+Cale Makar               = 0.4  # D1/PP1
+Rickard Rakell           = 2.2x # L2/PP2
+Egor Chinakhov           = 80%  # Evaluates to 0.80
+Brent Burns              = 1,5  # Evaluates to 1.50 | D2
+Sam Malinski             = .5   # Evaluates to 0.50
+Elias Pettersson (D)     = 0.0  # VAN D | D2
 ```
 
 ### 4. Optimize Lineups

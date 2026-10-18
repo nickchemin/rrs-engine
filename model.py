@@ -57,6 +57,81 @@ POS_AVERAGES: Dict[str, Dict[str, float]] = {
 }
 
 
+def compute_line_factor(
+    ev_line: Optional[str] = None,
+    pp_unit: Optional[str] = None,
+    position: str = "F"
+) -> Tuple[float, float, float]:
+    """
+    Computes (goal_mult, assist_mult, toi_adj) based on EV line deployment and PP unit.
+    - PP1: +12% goals, +18% assists, +1.5 min TOI
+    - PP2: +4% goals, +5% assists, +0.5 min TOI
+    - No PP (when EV line is known): -8% goals, -12% assists, -0.5 min TOI
+    - EV deployment:
+      - L1: +5% goals, +5% assists, +1.0 min TOI
+      - L2: +2% goals, +2% assists, 0.0 min TOI
+      - L3: -5% goals, -5% assists, -1.0 min TOI
+      - L4: -12% goals, -15% assists, -2.5 min TOI
+      - D1: +4% assists, +1.5 min TOI
+      - D2: 0.0
+      - D3: -8% assists, -2.5 min TOI
+      - D4: -15% assists, -4.0 min TOI
+    If ev_line and pp_unit are None, returns (1.0, 1.0, 0.0).
+    """
+    if not ev_line and not pp_unit:
+        return 1.0, 1.0, 0.0
+
+    g_mult = 1.0
+    a_mult = 1.0
+    toi_adj = 0.0
+
+    # PP Adjustment
+    if pp_unit == "PP1":
+        g_mult += 0.12
+        a_mult += 0.18
+        toi_adj += 1.5
+    elif pp_unit == "PP2":
+        g_mult += 0.04
+        a_mult += 0.05
+        toi_adj += 0.5
+    elif pp_unit is None and ev_line:
+        g_mult -= 0.08
+        a_mult -= 0.12
+        toi_adj -= 0.5
+
+    # EV Line Adjustment
+    if ev_line:
+        ev = ev_line.upper()
+        if ev == "L1":
+            g_mult += 0.05
+            a_mult += 0.05
+            toi_adj += 1.0
+        elif ev == "L2":
+            g_mult += 0.02
+            a_mult += 0.02
+        elif ev == "L3":
+            g_mult -= 0.05
+            a_mult -= 0.05
+            toi_adj -= 1.0
+        elif ev == "L4":
+            g_mult -= 0.12
+            a_mult -= 0.15
+            toi_adj -= 2.5
+        elif ev == "D1":
+            a_mult += 0.04
+            toi_adj += 1.5
+        elif ev == "D2":
+            pass
+        elif ev == "D3":
+            a_mult -= 0.08
+            toi_adj -= 2.5
+        elif ev == "D4":
+            a_mult -= 0.15
+            toi_adj -= 4.0
+
+    return max(0.6, round(g_mult, 3)), max(0.5, round(a_mult, 3)), round(toi_adj, 2)
+
+
 class PerformancePredictor:
     def __init__(self):
         self.multi_model: Optional[RidgeRegression] = None
@@ -168,7 +243,9 @@ class PerformancePredictor:
         game_date: str,
         standings: Dict[str, Dict[str, float]],
         position: str = "F",
-        goalie_factor: float = 1.0
+        goalie_factor: float = 1.0,
+        ev_line: Optional[str] = None,
+        pp_unit: Optional[str] = None
     ) -> Dict[str, Any]:
         pos_key = "D" if str(position).upper() in ("D", "DEF") else "F"
         pos_avg = POS_AVERAGES[pos_key]
@@ -256,6 +333,13 @@ class PerformancePredictor:
                 preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
                 preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
 
+        # Line combination & power play deployment adjustment
+        g_line_mult, a_line_mult, toi_line_adj = compute_line_factor(ev_line, pp_unit, position=position)
+        if (g_line_mult, a_line_mult, toi_line_adj) != (1.0, 1.0, 0.0):
+            preds["goals"] = max(0.0, preds["goals"] * g_line_mult)
+            preds["assists"] = max(0.0, preds["assists"] * a_line_mult)
+            preds["toi"] = max(5.0, preds["toi"] + toi_line_adj)
+
         is_def = position in ("D", "DEF")
         blk_rate = 0.09 if is_def else 0.04
         blocked = round(preds["toi"] * blk_rate, 2)
@@ -281,7 +365,9 @@ class PerformancePredictor:
             "xBLK": blocked,
             "xTOI": formatted_toi,
             "xRRS": rrs_base,
-            "base_pts": rrs_base
+            "base_pts": rrs_base,
+            "ev_line": ev_line,
+            "pp_unit": pp_unit
         }
 
 

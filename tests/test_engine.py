@@ -24,7 +24,8 @@ from nhl_api import (
 from model import (
     PerformancePredictor,
     calculate_rrs_from_stats,
-    calculate_xrrs_projection
+    calculate_xrrs_projection,
+    compute_line_factor
 )
 from main import (
     parse_iso_date_arg,
@@ -46,6 +47,7 @@ from main import (
     assign_slots,
     settle_past_lineups,
     print_quant_banner,
+    print_lineup_table,
     _warned_ambiguous_names
 )
 
@@ -475,7 +477,7 @@ class TestLineupOptimizer(unittest.TestCase):
         with patch("sys.stdout", buf):
             print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
         out = buf.getvalue()
-        self.assertIn("RRS ENGINE v2.2", out)
+        self.assertIn("RRS ENGINE v2.3", out)
         self.assertIn("Mode: Sync Roster & Boosters", out)
         self.assertIn("Date: 2026-10-17", out)
         self.assertIn("____", out)
@@ -1044,6 +1046,163 @@ class TestQAThirdReview(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+
+class TestTeamLinesAndDeployment(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(self.fd)
+        self.db = Database(db_path=self.db_path)
+        self.client = NHLClient(db=self.db)
+
+    def tearDown(self):
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def test_db_save_and_get_team_lines(self):
+        lines_data = {
+            "connor mcdavid": {"ev_line": "L1", "pp_unit": "PP1", "pk_unit": None, "position": "C"},
+            "evan bouchard": {"ev_line": "D1", "pp_unit": "PP1", "pk_unit": "PK2", "position": "RD"}
+        }
+        self.db.save_team_lines("EDM", lines_data)
+
+        fetched = self.db.get_team_lines("EDM")
+        self.assertIsNotNone(fetched)
+        self.assertEqual(len(fetched), 2)
+        self.assertEqual(fetched["connor mcdavid"]["ev_line"], "L1")
+        self.assertEqual(fetched["connor mcdavid"]["pp_unit"], "PP1")
+        self.assertEqual(fetched["evan bouchard"]["ev_line"], "D1")
+
+        # Batch lookup
+        batch = self.db.get_all_lines_for_teams(["EDM", "NYR"])
+        self.assertIn("EDM", batch)
+        self.assertEqual(batch["EDM"]["connor mcdavid"]["pp_unit"], "PP1")
+        self.assertNotIn("NYR", batch)
+
+        # Expired check
+        expired = self.db.get_team_lines("EDM", max_age_hours=0.0)
+        self.assertIsNone(expired)
+
+    def test_nhl_client_get_team_lines_dfo_parsing(self):
+        mock_html = """
+        <html><body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {
+            "props": {
+                "pageProps": {
+                    "combinations": {
+                        "players": [
+                            {"name": "Connor McDavid", "categoryIdentifier": "ev", "groupIdentifier": "f1", "positionIdentifier": "c"},
+                            {"name": "Connor McDavid", "categoryIdentifier": "pp", "groupIdentifier": "pp1", "positionIdentifier": "c"},
+                            {"name": "Evan Bouchard", "categoryIdentifier": "ev", "groupIdentifier": "d1", "positionIdentifier": "rd"},
+                            {"name": "Evan Bouchard", "categoryIdentifier": "pp", "groupIdentifier": "pp1", "positionIdentifier": "rd"},
+                            {"name": "Ryan Shea", "categoryIdentifier": "ev", "groupIdentifier": "d2", "positionIdentifier": "ld"}
+                        ]
+                    }
+                }
+            }
+        }
+        </script>
+        </body></html>
+        """
+        mock_res = MagicMock()
+        mock_res.status_code = 200
+        mock_res.text = mock_html
+        with patch.object(self.client.session, "get", return_value=mock_res):
+            res = self.client.get_team_lines("EDM", force=True)
+            self.assertIn("connor mcdavid", res)
+            self.assertEqual(res["connor mcdavid"]["ev_line"], "L1")
+            self.assertEqual(res["connor mcdavid"]["pp_unit"], "PP1")
+            self.assertEqual(res["evan bouchard"]["ev_line"], "D1")
+            self.assertEqual(res["evan bouchard"]["pp_unit"], "PP1")
+            self.assertEqual(res["ryan shea"]["ev_line"], "D2")
+            self.assertIsNone(res["ryan shea"]["pp_unit"])
+
+    def test_compute_line_factor_multipliers(self):
+        # PP1 + L1 forward: elevated goal, assist, and TOI
+        g_mult, a_mult, toi_adj = compute_line_factor("L1", "PP1", "F")
+        self.assertGreater(g_mult, 1.10)
+        self.assertGreater(a_mult, 1.15)
+        self.assertGreater(toi_adj, 1.5)
+
+        # L4 forward without PP: reduced multipliers
+        g_mult4, a_mult4, toi_adj4 = compute_line_factor("L4", None, "F")
+        self.assertLess(g_mult4, 0.90)
+        self.assertLess(a_mult4, 0.85)
+        self.assertLess(toi_adj4, 0.0)
+
+        # No line data: clean 1.0, 1.0, 0.0 neutral fallback
+        g_none, a_none, toi_none = compute_line_factor(None, None, "F")
+        self.assertEqual((g_none, a_none, toi_none), (1.0, 1.0, 0.0))
+
+        # D1 defense with PP1: elevated assists and TOI
+        g_d, a_d, toi_d = compute_line_factor("D1", "PP1", "D")
+        self.assertGreater(a_d, 1.15)
+        self.assertGreaterEqual(toi_d, 2.5)
+
+    def test_predict_with_ev_line_and_pp_unit(self):
+        predictor = PerformancePredictor()
+        standings = {"CGY": {"defense_factor": 1.0}}
+
+        pred_top = predictor.predict(
+            game_logs=[],
+            is_home=True,
+            opponent_abbrev="CGY",
+            game_date="2026-10-18",
+            standings=standings,
+            position="F",
+            ev_line="L1",
+            pp_unit="PP1"
+        )
+
+        pred_bot = predictor.predict(
+            game_logs=[],
+            is_home=True,
+            opponent_abbrev="CGY",
+            game_date="2026-10-18",
+            standings=standings,
+            position="F",
+            ev_line="L4",
+            pp_unit=None
+        )
+
+        self.assertGreater(pred_top["xG"], pred_bot["xG"])
+        self.assertGreater(pred_top["xA"], pred_bot["xA"])
+        self.assertGreater(pred_top["xRRS"], pred_bot["xRRS"])
+        self.assertEqual(pred_top["ev_line"], "L1")
+        self.assertEqual(pred_top["pp_unit"], "PP1")
+
+    def test_solve_stacked_lineup_pp1_synergy_and_label(self):
+        candidates = [
+            {"id": 1, "name": "Connor McDavid", "team": "EDM", "pos": "F", "xRRS": 9.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 2, "name": "Leon Draisaitl", "team": "EDM", "pos": "F", "xRRS": 8.5, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 3, "name": "Nathan MacKinnon", "team": "COL", "pos": "F", "xRRS": 9.2, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 4, "name": "Cale Makar", "team": "COL", "pos": "D", "xRRS": 8.8, "booster": 0.0, "ev_line": "D1", "pp_unit": "PP1"},
+            {"id": 5, "name": "Kirill Kaprizov", "team": "MIN", "pos": "F", "xRRS": 8.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 6, "name": "Sidney Crosby", "team": "PIT", "pos": "F", "xRRS": 7.5, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"}
+        ]
+        lineup, base_score, syn_score = solve_stacked_lineup(candidates)
+        self.assertEqual(len(lineup), 5)
+        self.assertGreater(syn_score, base_score)
+        stacks = [p["stack"] for p in lineup if p.get("stack")]
+        self.assertTrue(any("PP1" in s for s in stacks))
+
+    def test_print_lineup_table_with_line_column(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "name": "Connor McDavid", "team": "EDM", "opp": "vsCGY", "opp_goalie": "D. Wolf", "xRRS": 9.5, "booster": 0.0, "score": 19.0, "line_tag": "L1/PP1", "stack": "[EDM PP1]"},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "name": "Leon Draisaitl", "team": "EDM", "opp": "vsCGY", "opp_goalie": "D. Wolf", "xRRS": 8.5, "booster": 0.0, "score": 15.3, "line_tag": "L1/PP1", "stack": "[EDM PP1]"},
+            {"slot": 3, "slot_boost": 1.6, "total_boost": 1.6, "name": "Cale Makar", "team": "COL", "opp": "@PHI", "opp_goalie": "S. Ersson", "xRRS": 8.0, "booster": 0.0, "score": 12.8, "line_tag": "D1/PP1", "stack": ""},
+            {"slot": 4, "slot_boost": 1.4, "total_boost": 1.4, "name": "Kirill Kaprizov", "team": "MIN", "opp": "vsCBJ", "opp_goalie": "E. Merzlikins", "xRRS": 7.5, "booster": 0.0, "score": 10.5, "line_tag": "L1/PP1", "stack": ""},
+            {"slot": 5, "slot_boost": 1.2, "total_boost": 1.2, "name": "Sidney Crosby", "team": "PIT", "opp": "@UTA", "opp_goalie": "C. Ingram", "xRRS": 7.0, "booster": 0.0, "score": 8.4, "line_tag": "L1/PP1", "stack": ""}
+        ]
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            print_lineup_table("2026-10-18", lineup, 66.0, title="Tournament Stack", synergy_score=72.5)
+        out = buf.getvalue()
+        self.assertIn("Line", out)
+        self.assertIn("L1/PP1", out)
+        self.assertIn("D1/PP1", out)
+        self.assertIn("[EDM PP1]", out)
 
 
 if __name__ == "__main__":

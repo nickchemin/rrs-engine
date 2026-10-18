@@ -115,6 +115,19 @@ class Database:
                     PRIMARY KEY (team, game_date)
                 );
 
+                CREATE TABLE IF NOT EXISTS team_lines (
+                    team TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    ev_line TEXT,
+                    pp_unit TEXT,
+                    pk_unit TEXT,
+                    position TEXT,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (team, player_name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_lines_team ON team_lines(team);
+
                 CREATE TABLE IF NOT EXISTS lineup_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     game_date TEXT NOT NULL,
@@ -581,6 +594,78 @@ class Database:
                     float(data.get("gaa", 3.00)),
                     now
                 ))
+
+    # --- Team Lines & Power Play Units ---
+    def get_team_lines(self, team: str, max_age_hours: float = 12.0) -> Optional[Dict[str, Dict[str, Any]]]:
+        min_updated = time.time() - (max_age_hours * 3600)
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT player_name, ev_line, pp_unit, pk_unit, position, updated_at
+                FROM team_lines
+                WHERE team = ? AND updated_at > ?
+            """, (team, min_updated))
+            rows = cur.fetchall()
+            if not rows:
+                return None
+            return {
+                r["player_name"]: {
+                    "ev_line": r["ev_line"],
+                    "pp_unit": r["pp_unit"],
+                    "pk_unit": r["pk_unit"],
+                    "position": r["position"]
+                } for r in rows
+            }
+
+    def save_team_lines(self, team: str, lines_data: Dict[str, Dict[str, Any]]):
+        if not lines_data:
+            return
+        now = time.time()
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            for p_name, data in lines_data.items():
+                cur.execute("""
+                    INSERT INTO team_lines (team, player_name, ev_line, pp_unit, pk_unit, position, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(team, player_name) DO UPDATE SET
+                        ev_line=excluded.ev_line,
+                        pp_unit=excluded.pp_unit,
+                        pk_unit=excluded.pk_unit,
+                        position=excluded.position,
+                        updated_at=excluded.updated_at
+                """, (
+                    team,
+                    p_name,
+                    data.get("ev_line"),
+                    data.get("pp_unit"),
+                    data.get("pk_unit"),
+                    data.get("position"),
+                    now
+                ))
+
+    def get_all_lines_for_teams(self, teams: List[str], max_age_hours: float = 12.0) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if not teams:
+            return {}
+        min_updated = time.time() - (max_age_hours * 3600)
+        placeholders = ",".join(["?"] * len(teams))
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"""
+                SELECT team, player_name, ev_line, pp_unit, pk_unit, position, updated_at
+                FROM team_lines
+                WHERE team IN ({placeholders}) AND updated_at > ?
+            """, (*teams, min_updated))
+            rows = cur.fetchall()
+            for r in rows:
+                t = r["team"]
+                result.setdefault(t, {})[r["player_name"]] = {
+                    "ev_line": r["ev_line"],
+                    "pp_unit": r["pp_unit"],
+                    "pk_unit": r["pk_unit"],
+                    "position": r["position"]
+                }
+        return result
 
     # --- Lineup History & Tracking ---
     def save_lineup_history(self, game_date: str, mode: str, lineup: List[Dict[str, Any]]):
