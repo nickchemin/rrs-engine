@@ -12,7 +12,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from db import Database, season_from_date
+from db import Database, season_from_date, TeamLines
 from nhl_api import (
     NHLClient,
     nhl_now,
@@ -44,6 +44,9 @@ from main import (
     match_injury,
     solve_optimal_lineup,
     solve_stacked_lineup,
+    compute_pair_synergy,
+    sync_game_day,
+    show_history_report,
     assign_slots,
     settle_past_lineups,
     print_quant_banner,
@@ -1205,5 +1208,464 @@ class TestTeamLinesAndDeployment(unittest.TestCase):
         self.assertIn("[EDM PP1]", out)
 
 
+class TestQAFourthReview(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(self.fd)
+        self.db = Database(db_path=self.db_path)
+        self.client = NHLClient(db=self.db)
+
+    def tearDown(self):
+        if os.path.exists(self.db_path):
+            try:
+                os.remove(self.db_path)
+            except Exception:
+                pass
+
+    # Point A1: Namesake lines disambiguation in same team (Vancouver's Elias Pettersson C vs D)
+    def test_a1_namesakes_lines_disambiguation(self):
+        mock_html = """
+        <html><body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {
+            "props": {
+                "pageProps": {
+                    "combinations": {
+                        "players": [
+                            {"name": "Elias Pettersson", "positionIdentifier": "c", "categoryIdentifier": "ev", "groupIdentifier": "f1"},
+                            {"name": "Elias Pettersson", "positionIdentifier": "c", "categoryIdentifier": "pp", "groupIdentifier": "pp1"},
+                            {"name": "Elias Pettersson", "positionIdentifier": "ld", "categoryIdentifier": "ev", "groupIdentifier": "d3"}
+                        ]
+                    }
+                }
+            }
+        }
+        </script>
+        </body></html>
+        """
+        mock_res = MagicMock()
+        mock_res.status_code = 200
+        mock_res.text = mock_html
+        with patch.object(self.client.session, "get", return_value=mock_res):
+            lines = self.client.get_team_lines("VAN", force=True)
+
+        self.assertIn(("elias pettersson", "F"), lines)
+        self.assertIn(("elias pettersson", "D"), lines)
+        self.assertEqual(lines.get(("elias pettersson", "F"))["ev_line"], "L1")
+        self.assertEqual(lines.get(("elias pettersson", "F"))["pp_unit"], "PP1")
+        self.assertEqual(lines.get(("elias pettersson", "D"))["ev_line"], "D3")
+        self.assertIsNone(lines.get(("elias pettersson", "D"))["pp_unit"])
+
+        # Save to DB and retrieve
+        self.db.save_team_lines("VAN", lines)
+        db_lines = self.db.get_team_lines("VAN")
+        self.assertEqual(db_lines.get(("elias pettersson", "F"))["ev_line"], "L1")
+        self.assertEqual(db_lines.get(("elias pettersson", "D"))["ev_line"], "D3")
+
+        # In collect_slate_skaters, forward gets L1/PP1, defenseman gets D3
+        mock_skaters = [
+            {"playerId": 101, "firstName": {"default": "Elias"}, "lastName": {"default": "Pettersson"}, "positionCode": "C", "gamesPlayed": 20, "goals": 10, "assists": 15, "shots": 50, "blockedShots": 10, "avgTimeOnIcePerGame": 19.5 * 60},
+            {"playerId": 102, "firstName": {"default": "Elias"}, "lastName": {"default": "Pettersson"}, "positionCode": "D", "gamesPlayed": 20, "goals": 1, "assists": 2, "shots": 15, "blockedShots": 25, "avgTimeOnIcePerGame": 16.0 * 60}
+        ]
+        with patch.object(self.client, "get_all_club_stats", return_value={"VAN": mock_skaters}):
+            active, _, _, _, _, _ = collect_slate_skaters(
+                self.client, self.db,
+                team_matchups={"VAN": ("CGY", True)},
+                goalies={}, injuries={}, boosters={},
+                team_lines={"VAN": lines},
+                game_date="2026-10-18",
+                today_str="2026-10-18"
+            )
+        f_skater = next(s for s in active if s["id"] == 101)
+        d_skater = next(s for s in active if s["id"] == 102)
+        self.assertEqual(f_skater["ev_line"], "L1")
+        self.assertEqual(f_skater["pp_unit"], "PP1")
+        self.assertEqual(d_skater["ev_line"], "D3")
+        self.assertGreater(f_skater["xRRS"], d_skater["xRRS"])
+        self.assertGreater(f_skater["xRRS"], 4.0)
+        self.assertLess(d_skater["xRRS"], 2.0)
+
+    # Point A2: No-PP penalty guard when team has no PP records
+    def test_a2_no_pp_penalty_guard(self):
+        # Without PP data for team (team_has_pp=False): no penalty
+        g_m, a_m, toi_d = compute_line_factor("L1", None, "F", team_has_pp=False)
+        self.assertAlmostEqual(g_m, 1.05, places=3)
+        self.assertAlmostEqual(a_m, 1.05, places=3)
+        self.assertAlmostEqual(toi_d, 1.0, places=3)
+
+        # With PP data present for team (team_has_pp=True): penalty applied
+        g_p, a_p, toi_p = compute_line_factor("L1", None, "F", team_has_pp=True)
+        self.assertLess(g_p, 1.0)
+        self.assertLess(a_p, 1.0)
+        self.assertAlmostEqual(toi_p, 0.5, places=3)
+
+        # PerformancePredictor passes team_has_pp correctly
+        predictor = PerformancePredictor()
+        standings = {"CGY": {"defense_factor": 1.0}}
+        pred_guard = predictor.predict(
+            game_logs=[], is_home=True, opponent_abbrev="CGY", game_date="2026-10-18",
+            standings=standings, position="F", ev_line="L1", pp_unit=None, team_has_pp=False
+        )
+        pred_penalized = predictor.predict(
+            game_logs=[], is_home=True, opponent_abbrev="CGY", game_date="2026-10-18",
+            standings=standings, position="F", ev_line="L1", pp_unit=None, team_has_pp=True
+        )
+        self.assertGreater(pred_guard["xG"], pred_penalized["xG"])
+        self.assertGreater(pred_guard["xA"], pred_penalized["xA"])
+
+    # Point A3: boosters.txt protection on empty stats and partial team stats
+    def test_a3_save_boosters_file_protection(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            initial_text = "# Existing boosters file\nConnor McDavid = 2.0\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(initial_text)
+
+            # 1. Empty candidates does NOT overwrite
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                save_boosters_file({}, [], path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, initial_text)
+            self.assertIn("boosters.txt was not modified", buf.getvalue())
+
+            # 2. Partial team sync preserves missing teams
+            existing_with_teams = (
+                "# ==============================================================================\n"
+                "# EDM — Edmonton Oilers\n"
+                "# ==============================================================================\n"
+                "Connor McDavid = 2.0\n\n"
+                "# ==============================================================================\n"
+                "# TOR — Toronto Maple Leafs\n"
+                "# ==============================================================================\n"
+                "Auston Matthews = 1.8\n"
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(existing_with_teams)
+
+            edm_only_candidates = [
+                {"name": "Connor McDavid", "team": "EDM", "pos": "F", "xRRS": 9.5, "avg_toi": 21.5, "booster": 2.0}
+            ]
+            save_boosters_file({}, edm_only_candidates, path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                new_content = f.read()
+            self.assertIn("EDM — Edmonton Oilers", new_content)
+            self.assertIn("TOR — Toronto Maple Leafs", new_content)
+            self.assertIn("Auston Matthews = 1.8", new_content)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point A4: Tournament stack upside >= standard DP optimal lineup base score
+    def test_a4_stack_vs_standard_ev_guarantee(self):
+        # Scenario 1: Players from 5 completely different teams (no stacks possible)
+        candidates_diff_teams = [
+            {"id": 1, "name": "Connor McDavid", "team": "EDM", "pos": "F", "xRRS": 9.5, "booster": 0.0},
+            {"id": 2, "name": "Nathan MacKinnon", "team": "COL", "pos": "F", "xRRS": 9.2, "booster": 0.0},
+            {"id": 3, "name": "Kirill Kaprizov", "team": "MIN", "pos": "F", "xRRS": 8.5, "booster": 0.0},
+            {"id": 4, "name": "Nikita Kucherov", "team": "TBL", "pos": "F", "xRRS": 8.2, "booster": 0.0},
+            {"id": 5, "name": "Auston Matthews", "team": "TOR", "pos": "F", "xRRS": 8.0, "booster": 0.0},
+            {"id": 6, "name": "Sidney Crosby", "team": "PIT", "pos": "F", "xRRS": 7.5, "booster": 0.0},
+        ]
+        dp_lineup, dp_base = solve_optimal_lineup(candidates_diff_teams)
+        st_lineup, st_base, st_upside = solve_stacked_lineup(candidates_diff_teams)
+        self.assertGreaterEqual(st_upside, dp_base)
+
+        # Scenario 2: Candidates with low-correlation teammates vs strong individuals
+        candidates_mixed = [
+            {"id": 1, "name": "Connor McDavid", "team": "EDM", "pos": "F", "xRRS": 9.5, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 2, "name": "Nathan MacKinnon", "team": "COL", "pos": "F", "xRRS": 9.2, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 3, "name": "Kirill Kaprizov", "team": "MIN", "pos": "F", "xRRS": 8.5, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 4, "name": "Nikita Kucherov", "team": "TBL", "pos": "F", "xRRS": 8.2, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 5, "name": "Auston Matthews", "team": "TOR", "pos": "F", "xRRS": 8.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 6, "name": "Corey Perry", "team": "EDM", "pos": "F", "xRRS": 2.0, "booster": 0.0, "ev_line": "L4", "pp_unit": None},
+        ]
+        dp_l2, dp_b2 = solve_optimal_lineup(candidates_mixed)
+        st_l2, st_b2, st_u2 = solve_stacked_lineup(candidates_mixed)
+        self.assertGreaterEqual(st_u2, dp_b2)
+
+    # Point B5: save_team_lines purges stale records before insert
+    def test_b5_stale_lines_cleanup(self):
+        initial_lines = {
+            "old player": {"ev_line": "L1", "pp_unit": "PP1", "position": "C"}
+        }
+        self.db.save_team_lines("EDM", initial_lines)
+        self.assertIn("old player", self.db.get_team_lines("EDM"))
+
+        new_lines = {
+            "new player": {"ev_line": "L1", "pp_unit": "PP1", "position": "C"}
+        }
+        self.db.save_team_lines("EDM", new_lines)
+        fetched = self.db.get_team_lines("EDM")
+        self.assertNotIn("old player", fetched)
+        self.assertIn("new player", fetched)
+
+    # Point B6: Historical game_date suppresses line factors
+    def test_b6_past_date_line_suppression(self):
+        lines = TeamLines({
+            ("connor mcdavid", "F"): {"ev_line": "L1", "pp_unit": "PP1", "position": "C"}
+        })
+        mock_skaters = [
+            {"playerId": 97, "firstName": {"default": "Connor"}, "lastName": {"default": "McDavid"}, "positionCode": "C", "gamesPlayed": 10, "goals": 10, "assists": 15, "shots": 40, "blockedShots": 5, "avgTimeOnIcePerGame": 21.0 * 60}
+        ]
+        with patch.object(self.client, "get_all_club_stats", return_value={"EDM": mock_skaters}):
+            active, _, _, _, _, _ = collect_slate_skaters(
+                self.client, self.db,
+                team_matchups={"EDM": ("CGY", True)},
+                goalies={}, injuries={}, boosters={},
+                team_lines={"EDM": lines},
+                game_date="2026-10-01",
+                today_str="2026-10-18"
+            )
+        skater = active[0]
+        self.assertIsNone(skater["ev_line"])
+        self.assertIsNone(skater["pp_unit"])
+        self.assertEqual(skater["line_tag"], "--")
+
+        # build_skater_projection also ignores line multipliers on past dates
+        logs = [{"gameDate": "2026-09-25", "goals": 1, "assists": 1, "shots": 4, "blockedShots": 0, "toi": "20:00", "opponentCommonName": {"default": "CGY"}, "homeRoadFlag": "H"}]
+        xrrs_past, _ = build_skater_projection(
+            {"pos": "C", "opp": "vsCGY", "is_home": True, "ev_line": "L1", "pp_unit": "PP1"},
+            logs=logs, standings={"CGY": {"defense_factor": 1.0}},
+            game_date="2026-10-01", today_str="2026-10-18"
+        )
+        xrrs_noline, _ = build_skater_projection(
+            {"pos": "C", "opp": "vsCGY", "is_home": True, "ev_line": None, "pp_unit": None},
+            logs=logs, standings={"CGY": {"defense_factor": 1.0}},
+            game_date="2026-10-01", today_str="2026-10-18"
+        )
+        self.assertAlmostEqual(xrrs_past, xrrs_noline, places=2)
+
+    # Point B7: Lines reporting string and DFO parsing
+    def test_b7_lines_reporting_and_validation(self):
+        mock_schedule = [
+            {"date": "2026-10-18", "games": [{"homeTeam": "EDM", "awayTeam": "TOR"}]}
+        ]
+        with patch.object(self.client, "get_upcoming_schedule", return_value=mock_schedule), \
+             patch.object(self.client, "get_injuries", return_value={}), \
+             patch.object(self.client, "get_starting_goalies", return_value={}), \
+             patch.object(self.client, "prefetch_teams_lines", return_value={"EDM": TeamLines({("connor mcdavid", "F"): {"ev_line": "L1", "pp_unit": "PP1"}})}), \
+             patch.object(self.client, "get_all_club_stats", return_value={"EDM": []}):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                sync_game_day(self.client, self.db, target_date="2026-10-18", force=True)
+            out = buf.getvalue()
+            self.assertIn("Lines: loaded 1 of 2 teams (missing: TOR)", out)
+
+    # Point B8: Booster value parsing and comment preservation
+    def test_b8_booster_val_and_comments_parsing(self):
+        self.assertEqual(parse_booster_val("2.8 #40 note"), 2.8)
+        self.assertEqual(parse_booster_val("1."), 1.0)
+        self.assertEqual(parse_booster_val(".5"), 0.5)
+        self.assertEqual(parse_booster_val("+15%"), 0.15)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            val_80 = parse_booster_val("80")
+        self.assertEqual(val_80, 0.8)
+        self.assertIn("читаю 80 как 80%", buf.getvalue())
+
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("Matt Boldy = 2.8 #40 note\nJack Eichel #25 = 1.5 # note\nConnor McDavid = 2.0\n")
+            boosters = load_boosters_file(path)
+            self.assertEqual(boosters.get("matt boldy"), 2.8)
+            self.assertEqual(boosters.get("jack eichel #25"), 1.5)
+            self.assertEqual(boosters.get("connor mcdavid"), 2.0)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point B9: settle_past_lineups boxscore fallback uses real blocks (no 1.0/0.3 fallback)
+    def test_b9_settle_past_lineups_fallback_blocks(self):
+        old_date = (nhl_now() - timedelta(days=4)).strftime("%Y-%m-%d")
+        lineup = [{
+            "id": 999, "name": "Old Defenseman", "team": "EDM", "slot": 1, "slot_boost": 2.0, "booster": 0.0,
+            "total_boost": 2.0, "xRRS": 7.0, "score": 14.0, "base_pts": 7.0, "ev_line": "D1", "pp_unit": "PP1"
+        }]
+        self.db.save_lineup_history("2026-10-18", "optimal", lineup)
+        with self.db._get_connection() as conn:
+            conn.execute("UPDATE lineup_history SET game_date = ? WHERE player_id = 999", (old_date,))
+
+        # Game log returns blockedShots = 2.0
+        mock_logs = [{
+            "gameDate": old_date, "gameId": 2026020001, "goals": 0, "assists": 1, "shots": 2, "blockedShots": 2.0, "toi": "22:00"
+        }]
+        with patch.object(self.client, "get_player_current_game_logs", return_value=mock_logs), \
+             patch.object(self.client, "get_boxscore_skaters", return_value={}):  # empty boxscore
+            settle_past_lineups(self.client, self.db)
+
+        history = self.db.get_history_slate_details(old_date)
+        self.assertEqual(len(history), 1)
+        row = history[0]
+        self.assertEqual(row["settled"], 1)
+        # Expected xRRS with blocks = 2.0: 0*3.0 + 1*2.0 + 2*0.25 + 2*0.50 = 3.5
+        expected_xrrs = calculate_rrs_from_stats(0.0, 1.0, 2.0, blocks=2.0)
+        self.assertAlmostEqual(row["actual_xrrs"], expected_xrrs, places=2)
+
+    # Point B10: lineup_history stores ev_line and pp_unit, with schema migration
+    def test_b10_lineup_history_tracks_lines_and_migration(self):
+        lineup = [{
+            "id": 100, "name": "Connor McDavid", "team": "EDM", "slot": 1, "slot_boost": 2.0, "booster": 0.0,
+            "total_boost": 2.0, "xRRS": 9.5, "score": 19.0, "base_pts": 9.5, "ev_line": "L1", "pp_unit": "PP1"
+        }]
+        self.db.save_lineup_history("2026-10-18", "optimal", lineup)
+        records = self.db.get_history_slate_details("2026-10-18")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["ev_line"], "L1")
+        self.assertEqual(records[0]["pp_unit"], "PP1")
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            show_history_report(self.db, target_date="2026-10-18")
+        out = buf.getvalue()
+        self.assertIn("Line", out)
+        self.assertIn("L1/PP1", out)
+
+    # Point C15.1: Predict does not apply line factor twice
+    def test_c15_1_no_double_line_factor_in_predict(self):
+        predictor = PerformancePredictor()
+        standings = {"CGY": {"defense_factor": 1.0}}
+        pred_base = predictor.predict(
+            game_logs=[], is_home=True, opponent_abbrev="CGY", game_date="2026-10-18",
+            standings=standings, position="F", ev_line=None, pp_unit=None
+        )
+        pred_line = predictor.predict(
+            game_logs=[], is_home=True, opponent_abbrev="CGY", game_date="2026-10-18",
+            standings=standings, position="F", ev_line="L1", pp_unit="PP1"
+        )
+        ratio = pred_line["xG"] / pred_base["xG"]
+        # Expected ratio: 1.05 * 1.12 = 1.176
+        self.assertAlmostEqual(ratio, 1.176, places=2)
+        # Double factor would be 1.176^2 = 1.383, which fails this assertion:
+        self.assertLess(ratio, 1.30)
+
+    # Point C15.2: Collect slate skaters applies line factor (L1/PP1 > L4)
+    def test_c15_2_collect_slate_skaters_applies_line_factor(self):
+        mock_skaters = [
+            {"playerId": 201, "firstName": {"default": "Top"}, "lastName": {"default": "Guy"}, "positionCode": "F", "gamesPlayed": 30, "goals": 15, "assists": 20, "shots": 75, "blockedShots": 10, "avgTimeOnIcePerGame": 18.0 * 60},
+            {"playerId": 202, "firstName": {"default": "Bot"}, "lastName": {"default": "Guy"}, "positionCode": "F", "gamesPlayed": 30, "goals": 15, "assists": 20, "shots": 75, "blockedShots": 10, "avgTimeOnIcePerGame": 18.0 * 60}
+        ]
+        lines = TeamLines({
+            ("top guy", "F"): {"ev_line": "L1", "pp_unit": "PP1"},
+            ("bot guy", "F"): {"ev_line": "L4", "pp_unit": None}
+        })
+        with patch.object(self.client, "get_all_club_stats", return_value={"EDM": mock_skaters}):
+            active, _, _, _, _, _ = collect_slate_skaters(
+                self.client, self.db,
+                team_matchups={"EDM": ("CGY", True)},
+                goalies={}, injuries={}, boosters={},
+                team_lines={"EDM": lines},
+                game_date="2026-10-18",
+                today_str="2026-10-18"
+            )
+        s_top = next(s for s in active if s["id"] == 201)
+        s_bot = next(s for s in active if s["id"] == 202)
+        self.assertGreater(s_top["xRRS"], s_bot["xRRS"])
+
+    # Point C15.3: Goalie table migration migrates old PK (team) to (team, game_date)
+    def test_c15_3_goalie_table_migration(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE TABLE goalies (
+                    team TEXT PRIMARY KEY,
+                    goalie_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    save_pct REAL NOT NULL,
+                    gaa REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            conn.execute("INSERT INTO goalies (team, goalie_name, status, save_pct, gaa, updated_at) VALUES ('EDM', 'Stuart Skinner', 'Confirmed', 0.910, 2.50, 1000.0)")
+            conn.commit()
+            conn.close()
+
+            # Initialize Database: runs _init_tables and _migrate_goalies_table
+            test_db = Database(db_path=db_path)
+            # Insert second goalie for same team on different date
+            test_db.save_starting_goalies({"EDM": {"goalie_name": "Calvin Pickard", "status": "Projected", "save_pct": 0.900, "gaa": 2.80}}, game_date="2026-10-19")
+            with test_db._get_connection() as c:
+                cur = c.cursor()
+                cur.execute("SELECT team, game_date, goalie_name FROM goalies ORDER BY game_date")
+                rows = cur.fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["goalie_name"], "Stuart Skinner")
+            self.assertEqual(rows[0]["game_date"], "")
+            self.assertEqual(rows[1]["goalie_name"], "Calvin Pickard")
+            self.assertEqual(rows[1]["game_date"], "2026-10-19")
+        finally:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+
+    # Point C15.4: Booster file writes line comments (# L1/PP1, # D1)
+    def test_c15_4_save_boosters_file_writes_line_comments(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            candidates = [
+                {"name": "Connor McDavid", "team": "EDM", "pos": "F", "xRRS": 9.5, "avg_toi": 21.0, "ev_line": "L1", "pp_unit": "PP1"},
+                {"name": "Evan Bouchard", "team": "EDM", "pos": "D", "xRRS": 8.0, "avg_toi": 23.0, "ev_line": "D1", "pp_unit": None}
+            ]
+            save_boosters_file({}, candidates, path=path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Connor McDavid", content)
+            self.assertIn("# L1/PP1", content)
+            self.assertIn("Evan Bouchard", content)
+            self.assertIn("# D1", content)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # Point C15.5: Bayesian shrinkage for gp < 10
+    def test_c15_5_bayesian_shrinkage_low_gp(self):
+        mock_skaters = [
+            {"playerId": 301, "firstName": {"default": "Hot"}, "lastName": {"default": "Rookie"}, "positionCode": "F", "gamesPlayed": 1, "goals": 3, "assists": 0, "shots": 3, "blockedShots": 0, "avgTimeOnIcePerGame": 16.0 * 60}
+        ]
+        with patch.object(self.client, "get_all_club_stats", return_value={"EDM": mock_skaters}):
+            active, _, _, _, _, _ = collect_slate_skaters(
+                self.client, self.db,
+                team_matchups={"EDM": ("CGY", True)},
+                goalies={}, injuries={}, boosters={},
+                team_lines={},
+                game_date="2026-10-18",
+                today_str="2026-10-18"
+            )
+        rookie = active[0]
+        # Without shrinkage: 3 G/GP * 3.0 pts/G = 9.0 alone => xRRS > 9.0
+        # With Bayesian shrinkage: (3 * 1 + 0.25 * 10) / 11 = 0.50 G/GP => xRRS < 5.0
+        self.assertLess(rookie["xRRS"], 5.0)
+
+    # Point C15.6: Teammate synergy only given to L1 and L2
+    def test_c15_6_synergy_bonus_only_l1_l2(self):
+        p_l1_a = {"id": 1, "pos": "F", "team": "EDM", "ev_line": "L1", "pp_unit": None, "goalie_factor": 1.0}
+        p_l1_b = {"id": 2, "pos": "F", "team": "EDM", "ev_line": "L1", "pp_unit": None, "goalie_factor": 1.0}
+        rate1, label1 = compute_pair_synergy(p_l1_a, p_l1_b)
+        self.assertEqual(rate1, 0.10)
+        self.assertEqual(label1, "[EDM L1]")
+
+        p_l2_a = {"id": 3, "pos": "F", "team": "EDM", "ev_line": "L2", "pp_unit": None, "goalie_factor": 1.0}
+        p_l2_b = {"id": 4, "pos": "F", "team": "EDM", "ev_line": "L2", "pp_unit": None, "goalie_factor": 1.0}
+        rate2, label2 = compute_pair_synergy(p_l2_a, p_l2_b)
+        self.assertEqual(rate2, 0.08)
+        self.assertEqual(label2, "[EDM L2]")
+
+        p_l3_a = {"id": 5, "pos": "F", "team": "EDM", "ev_line": "L3", "pp_unit": None, "goalie_factor": 1.0}
+        p_l3_b = {"id": 6, "pos": "F", "team": "EDM", "ev_line": "L3", "pp_unit": None, "goalie_factor": 1.0}
+        rate3, label3 = compute_pair_synergy(p_l3_a, p_l3_b)
+        self.assertEqual(rate3, 0.06)
+        self.assertEqual(label3, "[EDM Pair]")
+        self.assertNotIn("L3", label3)
+
+
 if __name__ == "__main__":
     unittest.main()
+

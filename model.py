@@ -60,13 +60,14 @@ POS_AVERAGES: Dict[str, Dict[str, float]] = {
 def compute_line_factor(
     ev_line: Optional[str] = None,
     pp_unit: Optional[str] = None,
-    position: str = "F"
+    position: str = "F",
+    team_has_pp: bool = True
 ) -> Tuple[float, float, float]:
     """
     Computes (goal_mult, assist_mult, toi_adj) based on EV line deployment and PP unit.
     - PP1: +12% goals, +18% assists, +1.5 min TOI
     - PP2: +4% goals, +5% assists, +0.5 min TOI
-    - No PP (when EV line is known): -8% goals, -12% assists, -0.5 min TOI
+    - No PP (when EV line is known and team has PP data): -8% goals, -12% assists, -0.5 min TOI
     - EV deployment:
       - L1: +5% goals, +5% assists, +1.0 min TOI
       - L2: +2% goals, +2% assists, 0.0 min TOI
@@ -94,7 +95,7 @@ def compute_line_factor(
         g_mult += 0.04
         a_mult += 0.05
         toi_adj += 0.5
-    elif pp_unit is None and ev_line:
+    elif pp_unit is None and ev_line and team_has_pp:
         g_mult -= 0.08
         a_mult -= 0.12
         toi_adj -= 0.5
@@ -245,7 +246,8 @@ class PerformancePredictor:
         position: str = "F",
         goalie_factor: float = 1.0,
         ev_line: Optional[str] = None,
-        pp_unit: Optional[str] = None
+        pp_unit: Optional[str] = None,
+        team_has_pp: bool = True
     ) -> Dict[str, Any]:
         pos_key = "D" if str(position).upper() in ("D", "DEF") else "F"
         pos_avg = POS_AVERAGES[pos_key]
@@ -334,7 +336,9 @@ class PerformancePredictor:
                 preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
 
         # Line combination & power play deployment adjustment
-        g_line_mult, a_line_mult, toi_line_adj = compute_line_factor(ev_line, pp_unit, position=position)
+        g_line_mult, a_line_mult, toi_line_adj = compute_line_factor(
+            ev_line, pp_unit, position=position, team_has_pp=team_has_pp
+        )
         if (g_line_mult, a_line_mult, toi_line_adj) != (1.0, 1.0, 0.0):
             preds["goals"] = max(0.0, preds["goals"] * g_line_mult)
             preds["assists"] = max(0.0, preds["assists"] * a_line_mult)

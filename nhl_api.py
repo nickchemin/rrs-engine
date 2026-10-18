@@ -4,12 +4,13 @@ import re
 import os
 import threading
 import unicodedata
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from db import Database, season_from_date
+from db import Database, season_from_date, TeamLines
 
 
 def nhl_now() -> datetime:
@@ -186,7 +187,12 @@ class NHLClient:
                     pass
                 return self.db.get_game_logs(player_id)
             elif latest_date:
-                # Latest log is before start of current season: fetch all missing seasons after it
+                # Latest log is before start of current season: check if already checked within 24h
+                p_rec = self.db.get_player(player_id)
+                now_ts = time.time()
+                if p_rec and p_rec.get("updated_at") and (now_ts - float(p_rec["updated_at"])) < 86400:
+                    return cached_logs
+
                 try:
                     last_season_start = int(season_from_date(latest_date)[:4])
                 except Exception:
@@ -201,6 +207,7 @@ class NHLClient:
                             all_logs.extend(logs)
                 if all_logs:
                     self.db.save_game_logs(player_id, all_logs)
+                self.db.touch_player_updated_at(player_id)
                 return self.db.get_game_logs(player_id)
 
         # Check legacy .cache folder if present - only if DB has no logs
@@ -542,7 +549,7 @@ class NHLClient:
             print(f"Failed to fetch boxscore for game {game_id}: {e}")
         return {}
 
-    def get_team_lines(self, team: str, force: bool = False) -> Dict[str, Dict[str, Any]]:
+    def get_team_lines(self, team: str, force: bool = False) -> Dict[Any, Dict[str, Any]]:
         if not force:
             cached = self.db.get_team_lines(team)
             if cached:
@@ -550,10 +557,10 @@ class NHLClient:
 
         slug = TEAM_TO_SLUG.get(team)
         if not slug:
-            return {}
+            return TeamLines()
 
         url = f"https://www.dailyfaceoff.com/teams/{slug}/line-combinations"
-        lines_data: Dict[str, Dict[str, Any]] = {}
+        lines_data = TeamLines()
         try:
             res = self.session.get(url, timeout=10)
             if res.status_code == 200:
@@ -562,41 +569,65 @@ class NHLClient:
                     data = json.loads(m.group(1))
                     comb = data.get("props", {}).get("pageProps", {}).get("combinations", {})
                     players = comb.get("players", [])
+                    if not players:
+                        print(f"⚠️ Warning: Daily Faceoff players data missing for {team}")
                     for p in players:
                         p_name = p.get("name")
                         if not p_name:
                             continue
                         nk = name_key(p_name)
-                        if nk not in lines_data:
-                            lines_data[nk] = {
+                        pos_id = (p.get("positionIdentifier") or p.get("position") or "").strip().upper()
+                        grp_id = (p.get("groupIdentifier") or "").strip().upper()
+                        if pos_id in ("D", "LD", "RD") or grp_id.startswith("D"):
+                            pos_group = "D"
+                        elif pos_id in ("G",) or grp_id.startswith("G"):
+                            pos_group = "G"
+                        else:
+                            pos_group = "F"
+
+                        key = (nk, pos_group)
+                        if key not in lines_data:
+                            lines_data[key] = {
                                 "player_name": p_name,
+                                "pos_group": pos_group,
                                 "ev_line": None,
                                 "pp_unit": None,
                                 "pk_unit": None,
-                                "position": (p.get("positionIdentifier") or "").upper()
+                                "position": pos_id
                             }
+                        entry = lines_data[key]
                         cat = (p.get("categoryIdentifier") or "").lower()
                         grp = (p.get("groupIdentifier") or "").lower()
                         if cat == "ev":
                             if grp in ("f1", "f2", "f3", "f4"):
-                                lines_data[nk]["ev_line"] = grp.replace("f", "L").upper()
+                                entry["ev_line"] = grp.replace("f", "L").upper()
                             elif grp in ("d1", "d2", "d3", "d4"):
-                                lines_data[nk]["ev_line"] = grp.upper()
+                                entry["ev_line"] = grp.upper()
                         elif cat == "pp":
                             if grp in ("pp1", "pp2"):
-                                lines_data[nk]["pp_unit"] = grp.upper()
+                                entry["pp_unit"] = grp.upper()
                         elif cat == "pk":
                             if grp in ("pk1", "pk2"):
-                                lines_data[nk]["pk_unit"] = grp.upper()
-                        if p.get("positionIdentifier"):
-                            pos_id = p.get("positionIdentifier").upper()
-                            if not pos_id.startswith("G") and not pos_id.startswith("IR"):
-                                lines_data[nk]["position"] = pos_id
+                                entry["pk_unit"] = grp.upper()
+                        if pos_id and not pos_id.startswith("G") and not pos_id.startswith("IR"):
+                            entry["position"] = pos_id
+
+                    # Namesake alias for Vancouver Elias Pettersson
+                    for (nk_item, p_grp), entry in list(lines_data.items()):
+                        if "elias nils pettersson" in nk_item and p_grp == "D":
+                            lines_data[("elias pettersson", "D")] = entry
+
+                    team_has_pp = any(v.get("pp_unit") for k, v in lines_data.items() if isinstance(v, dict))
+                    lines_data._meta = {"has_pp": team_has_pp}
 
                     if lines_data:
                         self.db.save_team_lines(team, lines_data)
-        except Exception:
-            pass
+                else:
+                    print(f"⚠️ Warning: Daily Faceoff page structure changed (no __NEXT_DATA__) for {team}")
+            else:
+                print(f"⚠️ Warning: Daily Faceoff returned HTTP {res.status_code} for {team}")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to fetch lines for {team}: {e}")
 
         return lines_data
 
@@ -605,7 +636,7 @@ class NHLClient:
         teams: List[str],
         max_workers: int = 6,
         force: bool = False
-    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    ) -> Dict[str, Dict[Any, Dict[str, Any]]]:
         if not teams:
             return {}
         result: Dict[str, Dict[str, Dict[str, Any]]] = {}

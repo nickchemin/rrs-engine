@@ -2,6 +2,23 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.3.1] - 2026-10-18
+
+### Added
+- **Intra-Team Namesake Deployment Disambiguation**: Team line deployment in `db.py` and `nhl_api.py` is keyed by composite `(name_key, pos_group)` with database primary key `(team, player_name, pos_group)`. Created a custom `TeamLines(dict)` subclass supporting dual tuple and name-based lookups, guaranteeing distinct line and power play assignments for namesakes on the same club (e.g. Vancouver's Elias Pettersson C on L1/PP1 vs D on D3).
+- **Conditional Power Play Penalty Guard**: In `compute_line_factor` and `PerformancePredictor.predict`, added `team_has_pp: bool` preventing the -8% goals / -12% assists penalty from being applied when the team's data lacks power play records.
+- **Booster File Overwrite & Partial Sync Protection**: In `save_boosters_file`, guarded against overwriting `boosters.txt` when 0 skater stats are retrieved from the NHL API. Added section-level preservation for teams present in the existing file that fail to load during partial syncs.
+- **Tournament Stack EV Floor Guarantee**: Initialized `solve_stacked_lineup` candidate pool with the DP optimal lineup (including naturally occurring teammate synergy), guaranteeing that tournament stack upside score $\ge$ standard DP lineup base score.
+- **Stale Team Lines Invalidation**: `save_team_lines` executes `DELETE FROM team_lines WHERE team = ?` prior to inserting freshly fetched lines to clear scratched or waived players.
+- **Historical Slate Backtest Isolation**: In `collect_slate_skaters` and `build_skater_projection`, line multipliers and tags are suppressed when `game_date < today_str`, preventing contemporary line deployment leakage into historical backtests.
+- **Diagnostic Deployment Reporting**: Terminal output reports loaded and missing team deployment counts (`Lines: loaded N of M teams (missing: ...)`).
+- **Flexible Value & Comment Parsing**: `parse_booster_val` and `load_boosters_file` strip `#` comments strictly to the right of `=` while preserving `#` in player names (`#25 Jack Eichel` or `Jack Eichel #25`). Added regex support for trailing decimal points (`1.`) and leading decimal points (`.5`).
+- **Defensive Settle Fallback Real Blocks**: In `settle_past_lineups`, matches $\ge 3$ days old lacking Gamecenter boxscore protocols resolve blocked shots from `blockedShots` in the player's official game log (falling back to 0.0), eliminating arbitrary default blocks (1.0 for D / 0.3 for F).
+- **Line Role Tracking in History**: Added `ev_line` and `pp_unit` to `lineup_history` with automatic table migration, displaying each skater's line tag in `--history [date]` and tracking empirical PP1 vs non-PP1 predictive bias.
+- **Synergy Multiplier Calibration**: Explicitly calibrated teammate synergy bonuses: L1 gives +10% (`[{team} L1]`), L2 gives +8% (`[{team} L2]`), while L3/L4 pairs fall back to generic 6% (`[{team} Pair]`).
+- **0 GP Season Query Throttling**: Added `players.updated_at` tracking in `touch_player_updated_at` to avoid re-querying missing historical seasons for zero-GP players within 24 hours.
+- **81 Offline Unit Tests**: Expanded test suite to 81 tests, adding `TestQAFourthReview` covering all items in Blocks A and B as well as all 6 regression test cases with real function executions.
+
 ## [2.3.0] - 2026-10-18
 
 ### Added
@@ -29,7 +46,7 @@ All notable changes to the RRS Engine project are documented in this file.
 - **Robust Settle Fallback for Missing Boxscores**: In `settle_past_lineups`, matches older than 3 days whose Gamecenter boxscore protocol remains unavailable or empty are settled using official stats from the player's game log rather than remaining pending forever.
 - **Automatic Missing Season Ingestion**: In `nhl_api.get_player_game_logs`, if a player's latest cached log predates the current season (prior to `YYYY-09-01`), all intervening and missing seasons are concurrently fetched and persisted to the database.
 - **Activation Hints for Commented Boosters**: `load_boosters_file` now detects non-zero booster assignments in `# [DEPTH]` and `# [DTD]` commented lines, emitting an actionable console hint reminding users to remove `#` to activate the player.
-- **Cross-Version Python Typing Fix**: Explicitly imported `Tuple` in `db.py`, ensuring backwards compatibility without `NameError` on Python 3.12 and 3.13 where PEP 649 deferred annotation evaluation is unavailable.
+- **Cross-Version Python Typing Fix**: Explicitly imported `Tuple` in `db.py`, ensuring backwards compatibility without `NameError` on Python 3.12 and 3.13 where type annotations are evaluated eagerly at import time (PEP 649 deferred annotation evaluation only applies starting in Python 3.14).
 - **59-Test Offline Test Suite**: Added `TestQAThirdReview` covering all edge cases across Blocks A and B with real function invocations (`is_slate_started`, `build_skater_projection`, `collect_slate_skaters`, `sync_boosters_to_db`).
 
 ### Changed

@@ -20,6 +20,54 @@ def season_from_date(game_date: str) -> str:
         return "20242025"
 
 
+class TeamLines(dict):
+    """
+    Dict mapping player line records. Supports keying by (player_name, pos_group)
+    or player_name fallback, while maintaining exact player count in len(self).
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._meta: Dict[str, Any] = {}
+
+    def get(self, key, default=None):
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key == "_meta":
+            return getattr(self, "_meta", default)
+        if isinstance(key, str):
+            for k, v in self.items():
+                if isinstance(k, tuple) and k[0] == key:
+                    return v
+        elif isinstance(key, tuple):
+            p_name, pos_group = key
+            for k, v in self.items():
+                if isinstance(k, str) and k == p_name:
+                    return v
+        return default
+
+    def __getitem__(self, key):
+        val = self.get(key)
+        if val is not None:
+            return val
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        if super().__contains__(key):
+            return True
+        if key == "_meta":
+            return bool(getattr(self, "_meta", None))
+        if isinstance(key, str):
+            for k in self.keys():
+                if isinstance(k, tuple) and k[0] == key:
+                    return True
+        elif isinstance(key, tuple):
+            p_name, pos_group = key
+            for k in self.keys():
+                if isinstance(k, str) and k == p_name:
+                    return True
+        return False
+
+
 class Database:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
@@ -118,12 +166,13 @@ class Database:
                 CREATE TABLE IF NOT EXISTS team_lines (
                     team TEXT NOT NULL,
                     player_name TEXT NOT NULL,
+                    pos_group TEXT NOT NULL DEFAULT 'F',
                     ev_line TEXT,
                     pp_unit TEXT,
                     pk_unit TEXT,
                     position TEXT,
                     updated_at REAL NOT NULL,
-                    PRIMARY KEY (team, player_name)
+                    PRIMARY KEY (team, player_name, pos_group)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_lines_team ON team_lines(team);
@@ -138,6 +187,8 @@ class Database:
                     player_name TEXT NOT NULL,
                     team TEXT NOT NULL,
                     opponent TEXT NOT NULL,
+                    ev_line TEXT,
+                    pp_unit TEXT,
                     booster REAL NOT NULL,
                     total_boost REAL NOT NULL,
                     proj_xrrs REAL NOT NULL,
@@ -191,6 +242,11 @@ class Database:
                             calibrated = 1
                     """)
 
+                if "ev_line" not in existing_cols:
+                    cur.execute("ALTER TABLE lineup_history ADD COLUMN ev_line TEXT")
+                if "pp_unit" not in existing_cols:
+                    cur.execute("ALTER TABLE lineup_history ADD COLUMN pp_unit TEXT")
+
             # Schema migration for injuries composite primary key
             cur.execute("PRAGMA table_info(injuries)")
             inj_info = cur.fetchall()
@@ -235,6 +291,28 @@ class Database:
                     """)
                     cur.execute("DROP TABLE goalies")
                     cur.execute("ALTER TABLE goalies_new RENAME TO goalies")
+
+            # Schema migration for team_lines (team, player_name, pos_group)
+            cur.execute("PRAGMA table_info(team_lines)")
+            tl_info = cur.fetchall()
+            if tl_info:
+                col_names = [c["name"] for c in tl_info]
+                if "pos_group" not in col_names:
+                    cur.execute("DROP TABLE team_lines")
+                    cur.execute("""
+                        CREATE TABLE team_lines (
+                            team TEXT NOT NULL,
+                            player_name TEXT NOT NULL,
+                            pos_group TEXT NOT NULL DEFAULT 'F',
+                            ev_line TEXT,
+                            pp_unit TEXT,
+                            pk_unit TEXT,
+                            position TEXT,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (team, player_name, pos_group)
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_lines_team ON team_lines(team)")
 
             conn.commit()
 
@@ -325,11 +403,18 @@ class Database:
     def get_player(self, player_id: int) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT player_id, name, team, position FROM players WHERE player_id = ?", (player_id,))
+            cur.execute("SELECT player_id, name, team, position, updated_at FROM players WHERE player_id = ?", (player_id,))
             r = cur.fetchone()
             if r:
                 return dict(r)
         return None
+
+    def touch_player_updated_at(self, player_id: int):
+        now = time.time()
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE players SET updated_at = ? WHERE player_id = ?", (now, player_id))
+            conn.commit()
 
     def get_all_players(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -596,38 +681,53 @@ class Database:
                 ))
 
     # --- Team Lines & Power Play Units ---
-    def get_team_lines(self, team: str, max_age_hours: float = 12.0) -> Optional[Dict[str, Dict[str, Any]]]:
+    def get_team_lines(self, team: str, max_age_hours: float = 12.0) -> Optional[TeamLines]:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT player_name, ev_line, pp_unit, pk_unit, position, updated_at
+                SELECT player_name, pos_group, ev_line, pp_unit, pk_unit, position, updated_at
                 FROM team_lines
                 WHERE team = ? AND updated_at > ?
             """, (team, min_updated))
             rows = cur.fetchall()
             if not rows:
                 return None
-            return {
-                r["player_name"]: {
+            res = TeamLines()
+            for r in rows:
+                data = {
+                    "player_name": r["player_name"],
                     "ev_line": r["ev_line"],
                     "pp_unit": r["pp_unit"],
                     "pk_unit": r["pk_unit"],
-                    "position": r["position"]
-                } for r in rows
-            }
+                    "position": r["position"],
+                    "pos_group": r["pos_group"]
+                }
+                res[(r["player_name"], r["pos_group"])] = data
+            has_pp = any(v.get("pp_unit") for k, v in res.items() if isinstance(v, dict))
+            res._meta = {"has_pp": has_pp}
+            return res
 
-    def save_team_lines(self, team: str, lines_data: Dict[str, Dict[str, Any]]):
+    def save_team_lines(self, team: str, lines_data: Dict[Any, Dict[str, Any]]):
         if not lines_data:
             return
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
-            for p_name, data in lines_data.items():
+            # Clean stale records for this team before inserting fresh lines
+            cur.execute("DELETE FROM team_lines WHERE team = ?", (team,))
+            for k, data in lines_data.items():
+                if k == "_meta" or not isinstance(data, dict):
+                    continue
+                if isinstance(k, tuple):
+                    p_name, pos_group = k
+                else:
+                    p_name = k
+                    pos_group = data.get("pos_group", "D" if str(data.get("position", "")).startswith("D") else "F")
                 cur.execute("""
-                    INSERT INTO team_lines (team, player_name, ev_line, pp_unit, pk_unit, position, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(team, player_name) DO UPDATE SET
+                    INSERT INTO team_lines (team, player_name, pos_group, ev_line, pp_unit, pk_unit, position, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(team, player_name, pos_group) DO UPDATE SET
                         ev_line=excluded.ev_line,
                         pp_unit=excluded.pp_unit,
                         pk_unit=excluded.pk_unit,
@@ -636,35 +736,45 @@ class Database:
                 """, (
                     team,
                     p_name,
+                    pos_group,
                     data.get("ev_line"),
                     data.get("pp_unit"),
                     data.get("pk_unit"),
                     data.get("position"),
                     now
                 ))
+            conn.commit()
 
-    def get_all_lines_for_teams(self, teams: List[str], max_age_hours: float = 12.0) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    def get_all_lines_for_teams(self, teams: List[str], max_age_hours: float = 12.0) -> Dict[str, TeamLines]:
         if not teams:
             return {}
         min_updated = time.time() - (max_age_hours * 3600)
         placeholders = ",".join(["?"] * len(teams))
-        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        result: Dict[str, TeamLines] = {}
         with self._get_connection() as conn:
             cur = conn.cursor()
             cur.execute(f"""
-                SELECT team, player_name, ev_line, pp_unit, pk_unit, position, updated_at
+                SELECT team, player_name, pos_group, ev_line, pp_unit, pk_unit, position, updated_at
                 FROM team_lines
                 WHERE team IN ({placeholders}) AND updated_at > ?
             """, (*teams, min_updated))
             rows = cur.fetchall()
             for r in rows:
                 t = r["team"]
-                result.setdefault(t, {})[r["player_name"]] = {
+                data = {
+                    "player_name": r["player_name"],
                     "ev_line": r["ev_line"],
                     "pp_unit": r["pp_unit"],
                     "pk_unit": r["pk_unit"],
-                    "position": r["position"]
+                    "position": r["position"],
+                    "pos_group": r["pos_group"]
                 }
+                if t not in result:
+                    result[t] = TeamLines()
+                result[t][(r["player_name"], r["pos_group"])] = data
+        for t, tl in result.items():
+            has_pp = any(v.get("pp_unit") for k, v in tl.items() if isinstance(v, dict))
+            tl._meta = {"has_pp": has_pp}
         return result
 
     # --- Lineup History & Tracking ---
@@ -679,9 +789,9 @@ class Database:
                 cur.execute("""
                     INSERT INTO lineup_history (
                         game_date, mode, slot, slot_boost, player_id, player_name,
-                        team, opponent, booster, total_boost, proj_xrrs, proj_rrs,
+                        team, opponent, ev_line, pp_unit, booster, total_boost, proj_xrrs, proj_rrs,
                         calibrated, settled, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
                 """, (
                     game_date,
                     mode,
@@ -691,6 +801,8 @@ class Database:
                     item["name"],
                     item["team"],
                     item.get("opp", ""),
+                    item.get("ev_line"),
+                    item.get("pp_unit"),
                     item.get("booster", 0.0),
                     item.get("total_boost", item["slot_boost"]),
                     item.get("xRRS", item.get("base_pts", 0.0)),
