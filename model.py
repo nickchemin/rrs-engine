@@ -558,9 +558,14 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
             "verified_structure": winner
         }
 
+    sample_warning = None
+    if len(valid) < 15:
+        sample_warning = f"Notice: Preliminary sample size (n={len(valid)} < 15) for estimating {len(feature_names)} parameters. Recommend N ≥ 15 for robust t-statistics."
+
     result = {
         "n_samples": len(valid),
         "is_ground_truth": is_ground_truth,
+        "sample_warning": sample_warning,
         "weights": weights_dict,
         "t_stats": t_stats,
         "r2": round(r2, 4),
@@ -574,6 +579,8 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
     print("=" * 80)
     print(f"Target:      {target_label}")
     print(f"Sample Size: {len(valid)} settled match boxscores from lineup_history")
+    if sample_warning:
+        print(f"             ⚠️ {sample_warning}")
     if not is_ground_truth:
         print("⚠️ Warning: Ground-truth app_rrs not found (synthetic fallback used).")
         print("   Record actual Real Sports mobile app ratings via: python main.py --record [date]")

@@ -916,8 +916,12 @@ class Database:
                     COUNT(*) as players_count,
                     SUM(proj_rrs) as total_proj_rrs,
                     SUM(CASE WHEN settled = 1 THEN actual_rrs ELSE 0 END) as total_actual_rrs,
+                    SUM(CASE WHEN app_payout IS NOT NULL THEN app_payout ELSE 0 END) as total_app_payout,
+                    COUNT(app_rrs) as app_rrs_count,
+                    COUNT(app_payout) as app_payout_count,
                     AVG(proj_rrs) as avg_proj_rrs,
                     AVG(CASE WHEN settled = 1 THEN actual_rrs ELSE NULL END) as avg_actual_rrs,
+                    AVG(CASE WHEN app_payout IS NOT NULL THEN (app_payout - proj_rrs) ELSE NULL END) as avg_app_bias,
                     AVG(CASE WHEN settled = 1 THEN (actual_rrs - proj_rrs) ELSE NULL END) as avg_bias_rrs,
                     MIN(settled) as all_settled
                 FROM lineup_history

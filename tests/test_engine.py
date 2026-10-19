@@ -2061,7 +2061,7 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual(len(stk_lineup), 5)
         self.assertEqual([p["slot_boost"] for p in stk_lineup], [3.0, 2.5, 2.0, 1.5, 1.0])
 
-    # 17. Batch recording Real App ratings via handle_record_app_scores
+    # 17. Batch recording Real App ratings via handle_record_app_scores (pure ground truth)
     def test_handle_record_app_scores_batch(self):
         lineup = [
             {"slot": i + 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 700 + i, "name": f"Player {i+1}", "team": "EDM", "pos": "F", "xRRS": 3.0, "score": 6.0, "booster": 0.0}
@@ -2077,8 +2077,99 @@ class TestReviewFixes(unittest.TestCase):
 
         recorded = self.db.get_lineup_for_date("2026-10-20", mode="standard")
         self.assertEqual([p["app_rrs"] for p in recorded], [5.2, 3.8, 1.4, 2.0, 4.5])
+        # Payouts must be None when only ratings are provided to prevent circular stacking verification
+        self.assertEqual([p["app_payout"] for p in recorded], [None, None, None, None, None])
+
+        # Test explicit rrs=payout syntax
+        buf2 = io.StringIO()
+        with patch("sys.stdout", buf2):
+            handle_record_app_scores(self.db, "2026-10-20:5.2=10.4,3.8=7.6,1.4,2.0,4.5")
+        recorded2 = self.db.get_lineup_for_date("2026-10-20", mode="standard")
+        self.assertEqual(recorded2[0]["app_payout"], 10.4)
+        self.assertEqual(recorded2[1]["app_payout"], 7.6)
+        self.assertIsNone(recorded2[2]["app_payout"])
+
+    # 18. Graceful handling of invalid date in handle_record_app_scores
+    def test_handle_record_app_scores_invalid_date(self):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            handle_record_app_scores(self.db, "invalid-date:5.2,3.8")
+        out = buf.getvalue()
+        self.assertIn("⚠️ Error:", out)
+
+    # 19. Mutually exclusive group includes --record
+    def test_record_mutually_exclusive_with_sync_and_history(self):
+        test_args = ["main.py", "--record", "today", "--sync"]
+        with patch("sys.argv", test_args):
+            with self.assertRaises(SystemExit):
+                main_entry()
+
+        test_args2 = ["main.py", "--record", "today", "--history"]
+        with patch("sys.argv", test_args2):
+            with self.assertRaises(SystemExit):
+                main_entry()
+
+    # 20. show_history_report displays ground truth app_rrs, app_payout, and bias
+    def test_show_history_report_with_app_ground_truth(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 801, "name": "McDavid", "team": "EDM", "pos": "F", "xRRS": 10.0, "score": 20.0, "pp_unit": "PP1"},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "id": 802, "name": "Draisaitl", "team": "EDM", "pos": "F", "xRRS": 8.0, "score": 14.4, "pp_unit": "PP1"}
+        ]
+        self.db.save_lineup_history("2026-10-21", "standard", lineup)
+        unsettled = self.db.get_unsettled_history()
+        for r in unsettled:
+            self.db.settle_history_player(
+                r["id"], goals=1, assists=1, shots=3, toi="20:00",
+                actual_xrrs=10.0, actual_rrs=20.0, blocks=1.0,
+                app_rrs=9.5, app_payout=19.0
+            )
+
+        # 1. Detail report
+        buf_detail = io.StringIO()
+        with patch("sys.stdout", buf_detail):
+            show_history_report(self.db, target_date="2026-10-21")
+        out_detail = buf_detail.getvalue()
+        self.assertIn("App RRS", out_detail)
+        self.assertIn("App Payout", out_detail)
+        self.assertIn("9.5", out_detail)
+        self.assertIn("19.0 RRS", out_detail)
+        self.assertIn("Ground Truth Tracking", out_detail)
+        self.assertIn("Model vs Real App Bias", out_detail)
+
+        # 2. Summary report
+        buf_summary = io.StringIO()
+        with patch("sys.stdout", buf_summary):
+            show_history_report(self.db)
+        out_summary = buf_summary.getvalue()
+        self.assertIn("App Payout", out_summary)
+        self.assertIn("App Bias", out_summary)
+        self.assertIn("App Ground Truth: 38.0 RRS", out_summary)
+
+    # 21. Calibration sample size diagnostic warning when N < 15
+    def test_calibrate_rrs_formula_sample_size_warning(self):
+        lineup = [
+            {"slot": i + 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 900 + i, "name": f"P{i}", "team": "EDM", "pos": "F", "xRRS": 3.0, "score": 6.0, "booster": 0.0}
+            for i in range(6)
+        ]
+        self.db.save_lineup_history("2026-10-22", "standard", lineup)
+        unsettled = self.db.get_unsettled_history()
+        for idx, r in enumerate(unsettled):
+            self.db.settle_history_player(
+                r["id"], goals=1, assists=1, shots=2, toi="18:00",
+                actual_xrrs=4.0, actual_rrs=8.0, blocks=0.0,
+                app_rrs=4.0, app_payout=8.0
+            )
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            res = calibrate_rrs_formula(self.db)
+        out = buf.getvalue()
+        self.assertIsNotNone(res)
+        self.assertIsNotNone(res["sample_warning"])
+        self.assertIn("Preliminary sample size (n=6 < 15)", out)
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

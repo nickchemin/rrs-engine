@@ -6,13 +6,18 @@ All notable changes to the RRS Engine project are documented in this file.
 
 ### Added
 - **Ground-Truth Mobile App Scores (`app_rrs` & `app_payout`)**: Added `app_rrs`, `app_payout`, and `actual_blocks` to `lineup_history` with automatic database migration, separating actual Real Sports ground truth from internal heuristic estimates (`actual_xrrs`).
-- **Interactive & Batch Result Recording (`--record`)**: Implemented `handle_record_app_scores` and CLI flag `--record [YYYY-MM-DD]` (supports both interactive console prompts and batch string `YYYY-MM-DD:s1,s2,s3,s4,s5`) for recording real ratings and payouts after match settlements.
+- **Interactive & Batch Result Recording (`--record`)**: Implemented `handle_record_app_scores` and CLI flag `--record [YYYY-MM-DD]` (supports both interactive console prompts and batch string `YYYY-MM-DD:s1,s2,s3,s4,s5`, with explicit `rrs=payout` syntax) for recording real ratings and payouts after match settlements.
+- **Non-Tautological Stacking Verification**: In `--record`, payout is no longer auto-calculated with the additive formula when the user only provides `app_rrs`, preventing circular confirmation of additive mechanics in `--calibrate`. Explicit `=payout` syntax is required for payout validation.
+- **Ground Truth Reporting in `--history`**: Added `App RRS` and `App Payout` columns to the detailed slate view, and `App Payout` and `App Bias` columns to the summary performance table, tracking empirical differences between model projections and verified Real Sports mobile app payouts.
+- **Mutually Exclusive CLI Operations**: Included `--record` in `argparse` mutually exclusive group with `--sync` and `--history`, preventing invalid command line flag combinations.
+- **Calibration Degrees-of-Freedom Diagnostic**: Emits a preliminary sample size diagnostic in `calibrate_rrs_formula` when $N < 15$ for the 5-parameter regression model ($w_0, w_G, w_A, w_S, w_{BLK}$).
+- **Graceful Date Handling**: Catches invalid ISO date errors in `--record` without unhandled tracebacks.
 - **Non-Circular OLS Calibration**: Enhanced `calibrate_rrs_formula` in `model.py` to prioritize ground-truth `app_rrs` ratings, adding an intercept term ($w_0$), blocked shots ($w_{BLK}$), degrees of freedom, and coefficient $t$-statistics. Prominently warns when falling back to internal synthetic estimates.
 - **Multiplier Stacking Verification (Additive vs Multiplicative)**: `--calibrate` automatically tests and verifies whether Real Sports computes payouts additively (`RRS * (slot + booster)`) or multiplicatively (`RRS * slot * (1 + booster)`), reporting MAE comparisons and confirmed mechanics.
 - **Configurable Slot Multipliers (`--slots`)**: Supported custom slot configurations via CLI (`--slots 2.0,1.8,1.6,1.4,1.2`) passed down into `optimizer.py`.
 - **Dynamic Stack Selection Multiplier**: Replaced the hardcoded `1.6x` heuristic in `solve_stacked_lineup` candidate pair ranking with the dynamic average top-pair multiplier `(slots[0] + slots[1]) / 2.0` (1.9x by default).
 - **Synchronized Versioning**: Aligned banner, CLI `--help`, and `pyproject.toml` to version 2.4.1.
-- **98 Unit Tests**: Suite expanded to 98 tests passing with 100% success.
+- **102 Unit Tests**: Suite expanded to 102 tests passing with 100% success.
 
 ## [2.4.0] - 2026-10-19
 
