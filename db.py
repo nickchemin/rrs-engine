@@ -196,9 +196,12 @@ class Database:
                     actual_goals REAL,
                     actual_assists REAL,
                     actual_shots REAL,
+                    actual_blocks REAL,
                     actual_toi TEXT,
                     actual_xrrs REAL,
                     actual_rrs REAL,
+                    app_rrs REAL,
+                    app_payout REAL,
                     settled INTEGER DEFAULT 0,
                     calibrated INTEGER DEFAULT 1,
                     created_at REAL NOT NULL,
@@ -246,6 +249,12 @@ class Database:
                     cur.execute("ALTER TABLE lineup_history ADD COLUMN ev_line TEXT")
                 if "pp_unit" not in existing_cols:
                     cur.execute("ALTER TABLE lineup_history ADD COLUMN pp_unit TEXT")
+                if "actual_blocks" not in existing_cols:
+                    cur.execute("ALTER TABLE lineup_history ADD COLUMN actual_blocks REAL")
+                if "app_rrs" not in existing_cols:
+                    cur.execute("ALTER TABLE lineup_history ADD COLUMN app_rrs REAL")
+                if "app_payout" not in existing_cols:
+                    cur.execute("ALTER TABLE lineup_history ADD COLUMN app_payout REAL")
 
             # Schema migration for injuries composite primary key
             cur.execute("PRAGMA table_info(injuries)")
@@ -829,7 +838,10 @@ class Database:
         shots: float,
         toi: str,
         actual_xrrs: float,
-        actual_rrs: float
+        actual_rrs: float,
+        blocks: float = 0.0,
+        app_rrs: Optional[float] = None,
+        app_payout: Optional[float] = None
     ):
         now = time.time()
         with self._get_connection() as conn:
@@ -839,14 +851,60 @@ class Database:
                     actual_goals = ?,
                     actual_assists = ?,
                     actual_shots = ?,
+                    actual_blocks = ?,
                     actual_toi = ?,
                     actual_xrrs = ?,
                     actual_rrs = ?,
+                    app_rrs = COALESCE(?, app_rrs),
+                    app_payout = COALESCE(?, app_payout),
                     settled = 1,
                     settled_at = ?
                 WHERE id = ?
-            """, (goals, assists, shots, toi, actual_xrrs, actual_rrs, now, entry_id))
+            """, (goals, assists, shots, blocks, toi, actual_xrrs, actual_rrs, app_rrs, app_payout, now, entry_id))
             conn.commit()
+
+    def record_app_results(self, updates: List[Dict[str, Any]]):
+        """
+        Updates actual Real Sports mobile app scores (app_rrs, app_payout) for lineup_history.
+        Each dict in updates must contain 'id' and 'app_rrs' (and optionally 'app_payout').
+        """
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            for u in updates:
+                cur.execute("""
+                    UPDATE lineup_history SET
+                        app_rrs = ?,
+                        app_payout = COALESCE(?, app_payout)
+                    WHERE id = ?
+                """, (u["app_rrs"], u.get("app_payout"), u["id"]))
+            conn.commit()
+
+    def get_lineup_for_date(self, game_date: str, mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            if mode:
+                cur.execute("""
+                    SELECT id, game_date, mode, slot, slot_boost, player_id, player_name,
+                           team, opponent, ev_line, pp_unit, booster, total_boost,
+                           proj_xrrs, proj_rrs, actual_goals, actual_assists, actual_shots,
+                           actual_blocks, actual_toi, actual_xrrs, actual_rrs, app_rrs, app_payout,
+                           settled
+                    FROM lineup_history
+                    WHERE game_date = ? AND mode = ?
+                    ORDER BY slot ASC
+                """, (game_date, mode))
+            else:
+                cur.execute("""
+                    SELECT id, game_date, mode, slot, slot_boost, player_id, player_name,
+                           team, opponent, ev_line, pp_unit, booster, total_boost,
+                           proj_xrrs, proj_rrs, actual_goals, actual_assists, actual_shots,
+                           actual_blocks, actual_toi, actual_xrrs, actual_rrs, app_rrs, app_payout,
+                           settled
+                    FROM lineup_history
+                    WHERE game_date = ?
+                    ORDER BY mode ASC, slot ASC
+                """, (game_date,))
+            return [dict(r) for r in cur.fetchall()]
 
     def get_history_slates(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -904,19 +962,23 @@ class Database:
                 "other_diffs": other_diffs
             }
 
-    def get_settled_stats_for_calibration(self) -> List[Dict[str, Any]]:
+    def get_settled_stats_for_calibration(self, app_scores_only: bool = False) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            query = """
                 SELECT
                     id, game_date, mode, slot, slot_boost, player_id, player_name,
                     team, opponent, ev_line, pp_unit, booster, total_boost,
                     proj_xrrs, proj_rrs, actual_goals, actual_assists, actual_shots,
-                    actual_toi, actual_xrrs, actual_rrs
+                    actual_blocks, actual_toi, actual_xrrs, actual_rrs,
+                    app_rrs, app_payout
                 FROM lineup_history
                 WHERE settled = 1 AND actual_rrs IS NOT NULL
-                ORDER BY game_date ASC, slot ASC
-            """)
+            """
+            if app_scores_only:
+                query += " AND app_rrs IS NOT NULL"
+            query += " ORDER BY game_date ASC, slot ASC"
+            cur.execute(query)
             return [dict(r) for r in cur.fetchall()]
 
     def get_lineup_level_validation_summary(self) -> Dict[str, Any]:

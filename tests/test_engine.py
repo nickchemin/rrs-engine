@@ -57,6 +57,7 @@ from main import (
     settle_past_lineups,
     print_quant_banner,
     print_lineup_table,
+    handle_record_app_scores,
     _warned_ambiguous_names,
     main as main_entry
 )
@@ -487,7 +488,7 @@ class TestLineupOptimizer(unittest.TestCase):
         with patch("sys.stdout", buf):
             print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
         out = buf.getvalue()
-        self.assertIn("RRS ENGINE v2.3", out)
+        self.assertIn("RRS ENGINE v2.4", out)
         self.assertIn("Mode: Sync Roster & Boosters", out)
         self.assertIn("Date: 2026-10-17", out)
         self.assertIn("____", out)
@@ -1973,6 +1974,109 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual(opt_base, main_base)
         self.assertEqual(len(opt_stk), 5)
         self.assertEqual(optimizer.SLOT_BOOSTS, [2.0, 1.8, 1.6, 1.4, 1.2])
+
+    # 14. DB app_rrs and app_payout schema, recording, and retrieval
+    def test_db_app_rrs_and_payout_schema_and_recording(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.5, "id": 501, "name": "Skater 1", "team": "EDM", "pos": "F", "xRRS": 4.0, "score": 10.0, "booster": 0.5},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "id": 502, "name": "Skater 2", "team": "TOR", "pos": "F", "xRRS": 3.5, "score": 6.3, "booster": 0.0},
+        ]
+        self.db.save_lineup_history("2026-10-15", "standard", lineup)
+        records = self.db.get_lineup_for_date("2026-10-15", mode="standard")
+        self.assertEqual(len(records), 2)
+        self.assertIsNone(records[0]["app_rrs"])
+
+        # Record real app results
+        self.db.record_app_results([
+            {"id": records[0]["id"], "app_rrs": 5.2, "app_payout": 13.0},
+            {"id": records[1]["id"], "app_rrs": 3.8, "app_payout": 6.84}
+        ])
+        updated = self.db.get_lineup_for_date("2026-10-15", mode="standard")
+        self.assertEqual(updated[0]["app_rrs"], 5.2)
+        self.assertEqual(updated[0]["app_payout"], 13.0)
+        self.assertEqual(updated[1]["app_rrs"], 3.8)
+
+        # Settle record, verify app_rrs preserved via COALESCE
+        self.db.settle_history_player(records[0]["id"], goals=1, assists=1, shots=3, toi="18:00", actual_xrrs=4.7, actual_rrs=11.75, blocks=1.0)
+        settled = self.db.get_lineup_for_date("2026-10-15", mode="standard")
+        self.assertEqual(settled[0]["app_rrs"], 5.2)
+        self.assertEqual(settled[0]["actual_blocks"], 1.0)
+
+    # 15. Ground-truth OLS calibration and Multiplier Stacking Test (Additive vs Multiplicative)
+    def test_calibrate_rrs_formula_with_ground_truth_app_rrs_and_stacking_test(self):
+        lineup = [
+            {"slot": i + 1, "slot_boost": [2.0, 1.8, 1.6, 1.4, 1.2, 1.0][i], "total_boost": [2.5, 2.0, 1.8, 1.4, 1.5, 1.0][i], "id": 600 + i, "name": f"P{i}", "team": "EDM", "pos": "F", "xRRS": 3.0, "score": 6.0, "booster": 0.5 if i % 2 == 0 else 0.0}
+            for i in range(6)
+        ]
+        self.db.save_lineup_history("2026-10-16", "standard", lineup[:5])
+        self.db.save_lineup_history("2026-10-17", "standard", [lineup[5]])
+
+        # Create known ground-truth app ratings: app_rrs = 1.0 (intercept) + 3.0*G + 1.2*A + 0.25*S + 0.5*BLK
+        data = [
+            (600, 2.0, 1.0, 4.0, 1.0),
+            (601, 1.0, 2.0, 3.0, 0.0),
+            (602, 0.0, 3.0, 5.0, 2.0),
+            (603, 3.0, 0.0, 6.0, 1.0),
+            (604, 0.0, 0.0, 2.0, 0.0),
+            (605, 1.0, 1.0, 1.0, 3.0)
+        ]
+        unsettled = self.db.get_unsettled_history()
+        for p_id, g, a, s, blk in data:
+            r = next(item for item in unsettled if item["player_id"] == p_id)
+            ground_rrs = round(1.0 + 3.0 * g + 1.2 * a + 0.25 * s + 0.5 * blk, 2)
+            tot_b = r["total_boost"]
+            payout = round(ground_rrs * tot_b, 2)  # Strictly Additive: rrs * (slot + booster)
+            self.db.settle_history_player(r["id"], goals=g, assists=a, shots=s, toi="18:00", actual_xrrs=ground_rrs, actual_rrs=payout, blocks=blk, app_rrs=ground_rrs, app_payout=payout)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            res = calibrate_rrs_formula(self.db)
+        out = buf.getvalue()
+        self.assertIsNotNone(res)
+        self.assertTrue(res["is_ground_truth"])
+        self.assertAlmostEqual(res["weights"]["intercept"], 1.0, delta=0.05)
+        self.assertAlmostEqual(res["weights"]["goals"], 3.0, delta=0.05)
+        self.assertAlmostEqual(res["weights"]["assists"], 1.2, delta=0.05)
+        self.assertAlmostEqual(res["weights"]["shots"], 0.25, delta=0.05)
+        self.assertAlmostEqual(res["weights"]["blocks"], 0.5, delta=0.05)
+        self.assertIsNotNone(res["stacking_test"])
+        self.assertEqual(res["stacking_test"]["verified_structure"], "Additive [slot + booster]")
+        self.assertIn("Multiplier Stacking Structure Verification", out)
+
+    # 16. Configurable slot boosts in optimizer
+    def test_configurable_slot_boosts(self):
+        candidates = [
+            {"name": "P1", "team": "EDM", "xRRS": 5.0, "booster": 0.0, "pos": "F"},
+            {"name": "P2", "team": "EDM", "xRRS": 4.5, "booster": 0.0, "pos": "F"},
+            {"name": "P3", "team": "TOR", "xRRS": 4.0, "booster": 0.0, "pos": "F"},
+            {"name": "P4", "team": "TOR", "xRRS": 3.5, "booster": 0.0, "pos": "F"},
+            {"name": "P5", "team": "BOS", "xRRS": 3.0, "booster": 0.0, "pos": "F"},
+        ]
+        custom_slots = [3.0, 2.5, 2.0, 1.5, 1.0]
+        lineup, score = optimizer.solve_optimal_lineup(candidates, slot_boosts=custom_slots)
+        self.assertEqual(len(lineup), 5)
+        self.assertEqual([p["slot_boost"] for p in lineup], [3.0, 2.5, 2.0, 1.5, 1.0])
+
+        stk_lineup, base_sc, syn_sc = optimizer.solve_stacked_lineup(candidates, slot_boosts=custom_slots)
+        self.assertEqual(len(stk_lineup), 5)
+        self.assertEqual([p["slot_boost"] for p in stk_lineup], [3.0, 2.5, 2.0, 1.5, 1.0])
+
+    # 17. Batch recording Real App ratings via handle_record_app_scores
+    def test_handle_record_app_scores_batch(self):
+        lineup = [
+            {"slot": i + 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 700 + i, "name": f"Player {i+1}", "team": "EDM", "pos": "F", "xRRS": 3.0, "score": 6.0, "booster": 0.0}
+            for i in range(5)
+        ]
+        self.db.save_lineup_history("2026-10-20", "standard", lineup)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            handle_record_app_scores(self.db, "2026-10-20:5.2,3.8,1.4,2.0,4.5")
+        out = buf.getvalue()
+        self.assertIn("Successfully recorded Real App scores for 5 players", out)
+
+        recorded = self.db.get_lineup_for_date("2026-10-20", mode="standard")
+        self.assertEqual([p["app_rrs"] for p in recorded], [5.2, 3.8, 1.4, 2.0, 4.5])
 
 
 if __name__ == "__main__":

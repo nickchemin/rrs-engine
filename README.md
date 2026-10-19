@@ -68,8 +68,9 @@ python -m unittest discover -s tests -v
 | `python main.py --date YYYY-MM-DD` | Runs optimizer for a specific slate date. |
 | `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific date. |
 | `python main.py --history` | Performance tracking table with cumulative profit and settled status. |
-| `python main.py --history YYYY-MM-DD` | Detailed box score breakdown for a specific date. |
-| `python main.py --calibrate` | Runs OLS empirical regression to reverse-engineer app scoring weights from settled history. |
+| `python main.py --record [date]` | Records actual Real Sports app ratings (app_rrs) & payouts for ground-truth calibration. |
+| `python main.py --slots 2.0,1.8,...` | Runs optimizer with custom slot multipliers. |
+| `python main.py --calibrate` | Runs OLS empirical regression to reverse-engineer app scoring weights and verify multiplier stacking. |
 | `python main.py --train` | Runs out-of-sample ML and lineup-level validation (strictly point-in-time, no look-ahead bias). |
 
 ## License

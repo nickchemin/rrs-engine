@@ -10,13 +10,16 @@ from typing import Dict, List, Any, Tuple, Optional
 SLOT_BOOSTS: List[float] = [2.0, 1.8, 1.6, 1.4, 1.2]
 
 
-def assign_slots(players: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
+def assign_slots(
+    players: List[Dict[str, Any]],
+    slot_boosts: Optional[List[float]] = None
+) -> Tuple[List[Dict[str, Any]], float]:
     """
-    Assigns slot multipliers (2.0x, 1.8x, 1.6x, 1.4x, 1.2x) to up to 5 skaters,
+    Assigns slot multipliers (default 2.0x, 1.8x, 1.6x, 1.4x, 1.2x) to up to 5 skaters,
     ordered in descending order of xRRS (Rearrangement Inequality).
     Computes individual player scores and detects team stacking tags.
     """
-    slots = SLOT_BOOSTS
+    slots = slot_boosts if slot_boosts is not None else SLOT_BOOSTS
     sorted_players = sorted(players, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)), reverse=True)
     assigned = []
     total_score = 0.0
@@ -103,13 +106,16 @@ def compute_pair_synergy(p1: Dict[str, Any], p2: Dict[str, Any]) -> Tuple[float,
     return max(0.02, total_rate), label
 
 
-def solve_optimal_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
+def solve_optimal_lineup(
+    candidates: List[Dict[str, Any]],
+    slot_boosts: Optional[List[float]] = None
+) -> Tuple[List[Dict[str, Any]], float]:
     """
     Solves the exact 5-slot draft optimizer problem.
 
     Mathematical Formulation:
       Given N candidates each with baseline xRRS x_i and individual booster b_i,
-      and 5 predetermined slots with multipliers s_1 > s_2 > s_3 > s_4 > s_5 (2.0 to 1.2),
+      and 5 predetermined slots with multipliers s_1 > s_2 > s_3 > s_4 > s_5 (default 2.0 to 1.2),
       select a subset of 5 distinct skaters and assign them to slots to maximize:
         Total Score = sum_{k=1}^5 x_{i_k} * (s_k + b_{i_k})
                     = sum_{k=1}^5 x_{i_k} * s_k + sum_{k=1}^5 x_{i_k} * b_{i_k}
@@ -124,10 +130,11 @@ def solve_optimal_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
     dynamic programming transition guarantees finding the globally optimal 5-skater
     lineup in O(5N) operations while satisfying the rearrangement inequality.
     """
+    slots = slot_boosts if slot_boosts is not None else SLOT_BOOSTS
     if not candidates:
         return [], 0.0
     if len(candidates) <= 5:
-        return assign_slots(candidates)
+        return assign_slots(candidates, slot_boosts=slots)
 
     sorted_cands = sorted(candidates, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)), reverse=True)
     dp: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {0: (0.0, [])}
@@ -135,36 +142,41 @@ def solve_optimal_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
     for p in sorted_cands:
         x = p.get("xRRS", p.get("base_pts", 0.0))
         b = p.get("booster", 0.0)
-        for k in range(4, -1, -1):
+        for k in range(min(len(slots) - 1, 4), -1, -1):
             if k in dp:
                 prev_score, prev_list = dp[k]
-                contrib = x * (SLOT_BOOSTS[k] + b)
+                contrib = x * (slots[k] + b)
                 new_score = prev_score + contrib
                 if k + 1 not in dp or new_score > dp[k + 1][0]:
                     dp[k + 1] = (new_score, prev_list + [p])
 
-    if 5 in dp:
-        return assign_slots(dp[5][1])
-    return assign_slots(sorted_cands[:5])
+    target_slots = min(5, len(slots))
+    if target_slots in dp:
+        return assign_slots(dp[target_slots][1], slot_boosts=slots)
+    return assign_slots(sorted_cands[:target_slots], slot_boosts=slots)
 
 
 def _pid(p: Dict[str, Any]) -> Any:
     return p.get("id", p.get("name"))
 
 
-def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float, float]:
+def solve_stacked_lineup(
+    candidates: List[Dict[str, Any]],
+    slot_boosts: Optional[List[float]] = None
+) -> Tuple[List[Dict[str, Any]], float, float]:
     """
     Tournament stack optimizer identifying high-correlation offensive combinations
     (Option A: 2 stacks + 1 standalone, Option B: 1 stack + 3 standalones).
     Synergy bonuses are calculated strictly using real assigned slot scores.
     Guarantees tournament upside score >= standard DP base score.
     """
+    slots = slot_boosts if slot_boosts is not None else SLOT_BOOSTS
     if len(candidates) < 5:
-        lineup, score = solve_optimal_lineup(candidates)
+        lineup, score = solve_optimal_lineup(candidates, slot_boosts=slots)
         return lineup, score, score
 
     # Baseline: DP optimal lineup guarantees upside >= standard DP base score
-    dp_lineup, dp_base = solve_optimal_lineup(candidates)
+    dp_lineup, dp_base = solve_optimal_lineup(candidates, slot_boosts=slots)
     dp_syn_diff = 0.0
     dp_with_stack = [dict(p) for p in dp_lineup]
     dp_by_team: Dict[str, List[Dict[str, Any]]] = {}
@@ -185,12 +197,15 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
     best_base_score = dp_base
     best_syn_score = round(dp_base + dp_syn_diff, 2)
 
+    top_pair_boost = round((slots[0] + slots[1]) / 2.0, 2) if len(slots) >= 2 else (slots[0] if slots else 1.6)
+    mid_boost = slots[2] if len(slots) > 2 else 1.6
+
     by_team: Dict[str, List[Dict[str, Any]]] = {}
     for c in candidates:
         by_team.setdefault(c["team"], []).append(c)
 
     for t in by_team:
-        by_team[t].sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+        by_team[t].sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (top_pair_boost + x.get("booster", 0.0)), reverse=True)
 
     viable_stacks = []
     for team, plist in by_team.items():
@@ -211,7 +226,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
                     continue
                 p1_r = p1.get("xRRS", p1.get("base_pts", 0.0))
                 p2_r = p2.get("xRRS", p2.get("base_pts", 0.0))
-                base_val = (p1_r * (1.6 + p1.get("booster", 0.0))) + (p2_r * (1.6 + p2.get("booster", 0.0)))
+                base_val = (p1_r * (top_pair_boost + p1.get("booster", 0.0))) + (p2_r * (top_pair_boost + p2.get("booster", 0.0)))
                 syn_rate, label = compute_pair_synergy(p1, p2)
                 syn_val = base_val * (1.0 + syn_rate)
                 if syn_val > best_syn_val:
@@ -250,13 +265,13 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             combined_ids = s1_ids | s2_ids
             remaining = [c for c in candidates if _pid(c) not in combined_ids]
             if remaining:
-                remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+                remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (mid_boost + x.get("booster", 0.0)), reverse=True)
                 p1a = dict(stack1["players"][0], stack=stack1["label"])
                 p1b = dict(stack1["players"][1], stack=stack1["label"])
                 p2a = dict(stack2["players"][0], stack=stack2["label"])
                 p2b = dict(stack2["players"][1], stack=stack2["label"])
                 five_players = [p1a, p1b, p2a, p2b, remaining[0]]
-                assigned, base_sc = assign_slots(five_players)
+                assigned, base_sc = assign_slots(five_players, slot_boosts=slots)
                 s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
                 s2_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s2_ids)
                 synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]) + (s2_assigned_sc * stack2["syn_rate"]), 2)
@@ -268,11 +283,11 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
         # Option B: Stack 1 + 3 standalone players
         remaining = [c for c in candidates if _pid(c) not in s1_ids]
         if len(remaining) >= 3:
-            remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+            remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (mid_boost + x.get("booster", 0.0)), reverse=True)
             p1a = dict(stack1["players"][0], stack=stack1["label"])
             p1b = dict(stack1["players"][1], stack=stack1["label"])
             five_players = [p1a, p1b] + remaining[:3]
-            assigned, base_sc = assign_slots(five_players)
+            assigned, base_sc = assign_slots(five_players, slot_boosts=slots)
             s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
             synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]), 2)
             if synergy_sc >= best_syn_score:
@@ -281,7 +296,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
                 best_lineup = assigned
 
     if not best_lineup:
-        lineup, score = solve_optimal_lineup(candidates)
+        lineup, score = solve_optimal_lineup(candidates, slot_boosts=slots)
         return lineup, score, score
 
     return best_lineup, best_base_score, best_syn_score

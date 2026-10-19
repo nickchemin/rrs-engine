@@ -447,68 +447,153 @@ def calculate_rrs_from_stats(
     return round(min(10.0, max(0.0, base)), 1)
 
 
-def calibrate_rrs_formula(db: Any) -> Optional[Dict[str, Any]]:
+def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Optional[Dict[str, Any]]:
     records = db.get_settled_stats_for_calibration() if hasattr(db, "get_settled_stats_for_calibration") else []
     if not records:
         print("\n⚠️ No settled player records found in lineup_history. Accumulate match outcomes to run empirical calibration.\n")
         return None
 
+    # Check for Ground Truth (app_rrs from Real Sports app)
+    app_records = [r for r in records if r.get("app_rrs") is not None]
+    is_ground_truth = len(app_records) >= 5
+
+    if is_ground_truth:
+        target_records = app_records
+        target_label = "Real Sports Mobile App Ground Truth (app_rrs)"
+    elif allow_synthetic_fallback:
+        target_records = records
+        target_label = "Internal Heuristic Estimates (Synthetic actual_xrrs Fallback)"
+    else:
+        print("\n⚠️ No actual Real Sports mobile app ratings (app_rrs) found in lineup_history.")
+        print("To avoid self-referential / circular validation of internal heuristics,")
+        print("record actual app scores with: python main.py --record [YYYY-MM-DD]\n")
+        return None
+
     valid = []
-    for r in records:
+    for r in target_records:
         g = r.get("actual_goals")
         a = r.get("actual_assists")
         s = r.get("actual_shots")
-        rrs = r.get("actual_rrs")
-        if g is not None and a is not None and s is not None and rrs is not None:
-            valid.append((float(g), float(a), float(s), float(rrs)))
+        blk = r.get("actual_blocks", 0.0)
+        target_val = r.get("app_rrs") if is_ground_truth else (r.get("actual_xrrs") if r.get("actual_xrrs") is not None else r.get("actual_rrs"))
+        if g is not None and a is not None and s is not None and target_val is not None:
+            valid.append({
+                "goals": float(g),
+                "assists": float(a),
+                "shots": float(s),
+                "blocks": float(blk or 0.0),
+                "target": float(target_val),
+                "slot_boost": float(r.get("slot_boost", 1.0)),
+                "booster": float(r.get("booster", 0.0)),
+                "app_payout": float(r["app_payout"]) if r.get("app_payout") is not None else None
+            })
 
     if len(valid) < 5:
         print(f"\n⚠️ Need at least 5 settled records for empirical regression calibration (found {len(valid)}).")
-        print("Run with --history or allow slate settlement to collect more data points.\n")
+        print("Run with --history, allow slate settlement, or record app scores with --record.\n")
         return None
 
-    G = np.array([v[0] for v in valid], dtype=np.float64)
-    A = np.array([v[1] for v in valid], dtype=np.float64)
-    S = np.array([v[2] for v in valid], dtype=np.float64)
-    Y = np.array([v[3] for v in valid], dtype=np.float64)
+    G = np.array([v["goals"] for v in valid], dtype=np.float64)
+    A = np.array([v["assists"] for v in valid], dtype=np.float64)
+    S = np.array([v["shots"] for v in valid], dtype=np.float64)
+    BLK = np.array([v["blocks"] for v in valid], dtype=np.float64)
+    ONES = np.ones(len(valid), dtype=np.float64)
+    Y = np.array([v["target"] for v in valid], dtype=np.float64)
 
-    X = np.column_stack([G, A, S])
+    has_blk = np.any(BLK > 0.0)
+    has_intercept = is_ground_truth or np.any(BLK > 0.0)
+    if has_intercept and has_blk:
+        X = np.column_stack([ONES, G, A, S, BLK])
+        feature_names = ["intercept", "goals", "assists", "shots", "blocks"]
+    elif has_intercept:
+        X = np.column_stack([ONES, G, A, S])
+        feature_names = ["intercept", "goals", "assists", "shots"]
+    else:
+        X = np.column_stack([G, A, S])
+        feature_names = ["goals", "assists", "shots"]
+
     weights, residuals, rank, s_vals = np.linalg.lstsq(X, Y, rcond=None)
-    w_g, w_a, w_s = float(weights[0]), float(weights[1]), float(weights[2])
-
     y_pred = X @ weights
+
+    weights_dict = {}
+    for name, w in zip(feature_names, weights):
+        weights_dict[name] = round(float(w), 3)
+
+    p = X.shape[1]
+    n = len(valid)
+    df = max(1, n - p)
     ss_tot = np.sum((Y - np.mean(Y)) ** 2)
     ss_res = np.sum((Y - y_pred) ** 2)
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
     mae = float(np.mean(np.abs(Y - y_pred)))
     rmse = float(np.sqrt(np.mean((Y - y_pred) ** 2)))
 
+    try:
+        sigma2 = ss_res / df
+        cov = sigma2 * np.linalg.pinv(X.T @ X)
+        se = np.sqrt(np.maximum(0.0, np.diag(cov)))
+        t_stats = {name: round(float(w / (s + 1e-9)), 2) for name, w, s in zip(feature_names, weights, se)}
+    except Exception:
+        t_stats = {}
+
+    # Multiplier Stacking Test (Additive vs Multiplicative)
+    stacking_result = None
+    payout_records = [v for v in valid if v["app_payout"] is not None and v["target"] > 0]
+    if len(payout_records) >= 3:
+        act_p = np.array([v["app_payout"] for v in payout_records])
+        rrs_vals = np.array([v["target"] for v in payout_records])
+        s_b = np.array([v["slot_boost"] for v in payout_records])
+        b_b = np.array([v["booster"] for v in payout_records])
+
+        pred_add = rrs_vals * (s_b + b_b)
+        pred_mult = rrs_vals * s_b * (1.0 + b_b)
+
+        mae_add = float(np.mean(np.abs(act_p - pred_add)))
+        mae_mult = float(np.mean(np.abs(act_p - pred_mult)))
+        winner = "Additive [slot + booster]" if mae_add <= mae_mult else "Multiplicative [slot * (1 + booster)]"
+        stacking_result = {
+            "n_payout_records": len(payout_records),
+            "mae_additive": round(mae_add, 3),
+            "mae_multiplicative": round(mae_mult, 3),
+            "verified_structure": winner
+        }
+
     result = {
         "n_samples": len(valid),
-        "weights": {
-            "goals": round(w_g, 3),
-            "assists": round(w_a, 3),
-            "shots": round(w_s, 3),
-        },
+        "is_ground_truth": is_ground_truth,
+        "weights": weights_dict,
+        "t_stats": t_stats,
         "r2": round(r2, 4),
         "mae": round(mae, 3),
-        "rmse": round(rmse, 3)
+        "rmse": round(rmse, 3),
+        "stacking_test": stacking_result
     }
 
     print("\n" + "=" * 80)
     print("           REAL SPORTS RRS EMPIRICAL FORMULA CALIBRATION (OLS)")
     print("=" * 80)
+    print(f"Target:      {target_label}")
     print(f"Sample Size: {len(valid)} settled match boxscores from lineup_history")
-    print("\nEstimated Event Weights vs Current Model Heuristics:")
-    print(f"  • Goal Weight (w_G):    {w_g:+.3f}  (Model Heuristic: +2.50 to +3.00)")
-    print(f"  • Assist Weight (w_A):  {w_a:+.3f}  (Model Heuristic: +1.00 to +1.05)")
-    print(f"  • Shot Weight (w_S):    {w_s:+.3f}  (Model Heuristic: +0.25)")
+    if not is_ground_truth:
+        print("⚠️ Warning: Ground-truth app_rrs not found (synthetic fallback used).")
+        print("   Record actual Real Sports mobile app ratings via: python main.py --record [date]")
+    print("\nEstimated Event Weights (OLS):")
+    for name, w in weights_dict.items():
+        t_val = f"(t = {t_stats.get(name, 0.0):+.2f})" if name in t_stats else ""
+        print(f"  • {name.capitalize():<12}: {w:+.3f} {t_val}")
+
     print("\nGoodness of Fit:")
     print(f"  • R² (Variance Explained): {r2:.4f}")
     print(f"  • Mean Absolute Error:     {mae:.3f} RRS")
     print(f"  • Root Mean Squared Error: {rmse:.3f} RRS")
-    print("=" * 80 + "\n")
 
+    if stacking_result:
+        print("\nMultiplier Stacking Structure Verification:")
+        print(f"  • Additive Model MAE:       {stacking_result['mae_additive']:.3f} RRS")
+        print(f"  • Multiplicative Model MAE: {stacking_result['mae_multiplicative']:.3f} RRS")
+        print(f"  • Confirmed Mechanic:       {stacking_result['verified_structure']}")
+
+    print("=" * 80 + "\n")
     return result
 
 

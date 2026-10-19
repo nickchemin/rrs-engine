@@ -64,7 +64,7 @@ def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str 
     if target_date:
         sub += f" | Date: {target_date}"
     banner = (
-        r"  ____   ____   ____     RRS ENGINE v2.3" "\n"
+        r"  ____   ____   ____     RRS ENGINE v2.4.1" "\n"
         r" |  _ \ |  _ \ / ___|    NHL Quant Draft Optimizer | Real Rating System" "\n"
         rf" | |_) || |_) |\___ \    {sub}" "\n"
         r" |  _ < |  _ <  ___) |" "\n"
@@ -876,7 +876,7 @@ def settle_past_lineups(client: NHLClient, db: Database):
 
             actual_xrrs = calculate_rrs_from_stats(g, a, s, blk)
             actual_rrs = round(actual_xrrs * r["total_boost"], 2)
-            db.settle_history_player(r["id"], g, a, s, toi_str, actual_xrrs, actual_rrs)
+            db.settle_history_player(r["id"], g, a, s, toi_str, actual_xrrs, actual_rrs, blocks=blk)
             settled_count += 1
         else:
             # Check for DNP (Did Not Play): slate is >= 3 days old or player has already played later
@@ -889,7 +889,7 @@ def settle_past_lineups(client: NHLClient, db: Database):
                 days_old = 0
 
             if days_old >= 3 or has_later_game:
-                db.settle_history_player(r["id"], 0.0, 0.0, 0.0, "DNP", 0.0, 0.0)
+                db.settle_history_player(r["id"], 0.0, 0.0, 0.0, "DNP", 0.0, 0.0, blocks=0.0)
                 settled_count += 1
 
     if settled_count > 0:
@@ -1071,8 +1071,91 @@ def build_skater_projection(
         return xrrs, base
 
 
+def handle_record_app_scores(db: Database, record_arg: str):
+    """
+    Interactively or in batch records actual Real Sports mobile app ratings (app_rrs)
+    and payouts (app_payout) into lineup_history for ground-truth model calibration.
+    """
+    if ":" in record_arg:
+        date_part, scores_part = record_arg.split(":", 1)
+        target_date = parse_iso_date_arg(date_part.strip())
+        score_tokens = [s.strip() for s in scores_part.split(",") if s.strip()]
+    else:
+        target_date = parse_iso_date_arg(record_arg.strip()) if record_arg != "today" else nhl_today()
+        score_tokens = []
+
+    lineup = db.get_lineup_for_date(target_date, mode="standard")
+    if not lineup:
+        all_lineups = db.get_lineup_for_date(target_date)
+        if all_lineups:
+            lineup = [p for p in all_lineups if p.get("mode") == all_lineups[0].get("mode")]
+
+    if not lineup:
+        print(f"\n⚠️ No lineup history found for date: {target_date}. Generate lineups first before recording results.\n")
+        return
+
+    updates = []
+    print(f"\nRecording Real Sports app ratings for {target_date}:")
+    print("-" * 75)
+    for idx, p in enumerate(lineup):
+        p_name = p.get("player_name", "Unknown")
+        slot = p.get("slot", idx + 1)
+        proj_r = p.get("proj_rrs", 0.0)
+        tot_b = p.get("total_boost", p.get("slot_boost", 1.0) + p.get("booster", 0.0))
+
+        app_rrs_val = None
+        app_payout_val = None
+
+        if idx < len(score_tokens):
+            token = score_tokens[idx]
+            if "=" in token:
+                parts = token.split("=")
+                try:
+                    app_rrs_val = float(parts[0].strip())
+                    app_payout_val = float(parts[1].strip())
+                except ValueError:
+                    pass
+            else:
+                try:
+                    app_rrs_val = float(token.strip())
+                    app_payout_val = round(app_rrs_val * tot_b, 2)
+                except ValueError:
+                    pass
+        else:
+            try:
+                prompt_str = f"Slot #{slot} | {p_name:<20} (Proj: {proj_r:>4.1f} RRS, Boost: {tot_b:.1f}x) -> App RRS: "
+                val_in = input(prompt_str).strip()
+                if val_in:
+                    if "=" in val_in:
+                        parts = val_in.split("=")
+                        app_rrs_val = float(parts[0].strip())
+                        app_payout_val = float(parts[1].strip())
+                    else:
+                        app_rrs_val = float(val_in)
+                        app_payout_val = round(app_rrs_val * tot_b, 2)
+            except (EOFError, KeyboardInterrupt):
+                print("\nInput cancelled.")
+                break
+            except ValueError:
+                print(f"Skipping invalid entry for {p_name}.")
+                continue
+
+        if app_rrs_val is not None:
+            updates.append({
+                "id": p["id"],
+                "app_rrs": app_rrs_val,
+                "app_payout": app_payout_val
+            })
+            print(f"  ✓ Slot #{slot} {p_name:<20}: App RRS = {app_rrs_val:.1f} (Payout = {app_payout_val:.1f} RRS)")
+
+    if updates:
+        db.record_app_results(updates)
+        print("-" * 75)
+        print(f"Successfully recorded Real App scores for {len(updates)} players on {target_date}.\n")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="RRS Engine v2.3 - Real Rating System & NHL Quant Draft Optimizer")
+    parser = argparse.ArgumentParser(description="RRS Engine v2.4.1 - Real Rating System & NHL Quant Draft Optimizer")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
@@ -1080,7 +1163,20 @@ def main():
     parser.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
     parser.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
     parser.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
+    parser.add_argument("--slots", type=str, default="", help="Custom comma-separated slot multipliers (default: 2.0,1.8,1.6,1.4,1.2)")
+    parser.add_argument("--record", nargs="?", const="today", default=None, help="Record actual Real Sports mobile app ratings and payouts (YYYY-MM-DD or YYYY-MM-DD:s1,s2,s3,s4,s5)")
     args = parser.parse_args()
+
+    custom_slots = None
+    if args.slots:
+        try:
+            custom_slots = [float(x.strip()) for x in args.slots.split(",") if x.strip()]
+            if len(custom_slots) < 5:
+                print(f"⚠️ Warning: Provided {len(custom_slots)} custom slots (expected 5). Falling back to default.")
+                custom_slots = None
+        except ValueError:
+            print("⚠️ Warning: Invalid slot format. Expected comma-separated floats (e.g. 2.0,1.8,1.6,1.4,1.2).")
+            custom_slots = None
 
     if args.sync:
         mode_label = "Sync Roster & Boosters"
@@ -1088,6 +1184,8 @@ def main():
         mode_label = "Model Validation & Backtest"
     elif args.calibrate:
         mode_label = "Empirical Scoring Calibration"
+    elif args.record is not None:
+        mode_label = "Record Real App Scores"
     elif args.history is not None:
         mode_label = "Performance Tracking & History"
     elif args.stack:
@@ -1103,6 +1201,10 @@ def main():
 
     # Settle any past games in history
     settle_past_lineups(client, db)
+
+    if args.record is not None:
+        handle_record_app_scores(db, args.record)
+        return
 
     if args.history is not None:
         target_d = args.history if args.history != "all" else None
@@ -1236,17 +1338,17 @@ def main():
 
     # 4. Solve optimal 5-slot lineup(s)
     if args.stack:
-        stacked_lineup, base_score, syn_score = solve_stacked_lineup(candidates)
+        stacked_lineup, base_score, syn_score = solve_stacked_lineup(candidates, slot_boosts=custom_slots)
         if can_save_history:
             db.save_lineup_history(game_date, "stack", stacked_lineup)
         print_lineup_table(game_date, stacked_lineup, base_score, title="Tournament Stack (Correlated Upside)", synergy_score=syn_score)
     else:
-        std_lineup, std_score = solve_optimal_lineup(candidates)
+        std_lineup, std_score = solve_optimal_lineup(candidates, slot_boosts=custom_slots)
         if can_save_history:
             db.save_lineup_history(game_date, "standard", std_lineup)
         print_lineup_table(game_date, std_lineup, std_score, title="Lineup #1: Standard Optimal (Max Base EV)")
 
-        stacked_lineup, base_score, syn_score = solve_stacked_lineup(candidates)
+        stacked_lineup, base_score, syn_score = solve_stacked_lineup(candidates, slot_boosts=custom_slots)
         if can_save_history:
             db.save_lineup_history(game_date, "stack", stacked_lineup)
         std_names = [p["name"] for p in std_lineup]
