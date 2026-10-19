@@ -348,7 +348,7 @@ class Database:
             conn.commit()
 
     # --- Schedule ---
-    def get_schedule(self, max_age_hours: float = 12.0) -> List[Dict[str, Any]]:
+    def get_schedule(self, max_age_hours: float = 3.0) -> List[Dict[str, Any]]:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
@@ -575,7 +575,7 @@ class Database:
             conn.commit()
 
     # --- Injuries ---
-    def get_injuries(self, max_age_hours: float = 4.0) -> Optional[Dict[Tuple[str, str], Dict[str, str]]]:
+    def get_injuries(self, max_age_hours: float = 3.0) -> Optional[Dict[Tuple[str, str], Dict[str, str]]]:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
@@ -884,3 +884,22 @@ class Database:
                     ORDER BY mode ASC, slot ASC
                 """, (game_date,))
             return [dict(r) for r in cur.fetchall()]
+
+    def get_role_bias_summary(self) -> Dict[str, List[float]]:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT pp_unit, proj_rrs, actual_rrs FROM lineup_history WHERE settled = 1")
+            pp1_diffs = []
+            other_diffs = []
+            for row in cur.fetchall():
+                p_rrs = float(row["proj_rrs"] or 0.0)
+                a_rrs = float(row["actual_rrs"] or 0.0)
+                diff = a_rrs - p_rrs
+                if row["pp_unit"] == "PP1":
+                    pp1_diffs.append(diff)
+                else:
+                    other_diffs.append(diff)
+            return {
+                "pp1_diffs": pp1_diffs,
+                "other_diffs": other_diffs
+            }

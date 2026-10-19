@@ -5,7 +5,7 @@ import os
 import threading
 import unicodedata
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, tzinfo
 from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.util.retry import Retry
@@ -13,12 +13,40 @@ from requests.adapters import HTTPAdapter
 from db import Database, season_from_date, TeamLines
 
 
+class USEasternTz(tzinfo):
+    """Accurate US Eastern Time fallback with Daylight Saving Time (EDT/EST)."""
+    def utcoffset(self, dt):
+        return timedelta(hours=-5) + self.dst(dt)
+
+    def dst(self, dt):
+        if dt is None:
+            return timedelta(0)
+        year = dt.year
+        # 2nd Sunday in March (starts 2:00 AM)
+        first_mar = datetime(year, 3, 1)
+        first_sun_mar = 1 + (6 - first_mar.weekday()) % 7
+        second_sun_mar = first_sun_mar + 7
+        dst_start = datetime(year, 3, second_sun_mar, 2, 0)
+        # 1st Sunday in November (ends 2:00 AM)
+        first_nov = datetime(year, 11, 1)
+        first_sun_nov = 1 + (6 - first_nov.weekday()) % 7
+        dst_end = datetime(year, 11, first_sun_nov, 2, 0)
+
+        dt_naive = dt.replace(tzinfo=None)
+        if dst_start <= dt_naive < dst_end:
+            return timedelta(hours=1)
+        return timedelta(0)
+
+    def tzname(self, dt):
+        return "EDT" if self.dst(dt) else "EST"
+
+
 def nhl_now() -> datetime:
     try:
         import zoneinfo
         tz = zoneinfo.ZoneInfo("America/New_York")
     except Exception:
-        tz = timezone(timedelta(hours=-5))
+        tz = USEasternTz()
     return datetime.now(tz)
 
 
@@ -42,8 +70,14 @@ def current_season_start_year() -> int:
 class NHLClient:
     def __init__(self, db: Optional[Database] = None):
         self.db = db or Database()
-        self.session = requests.Session()
-        self.session.headers.update({
+        self._local = threading.local()
+        self._custom_session = None
+        self._boxscore_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
+        self._boxscore_lock = threading.Lock()
+
+    def _create_session(self) -> requests.Session:
+        s = requests.Session()
+        s.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         adapter = HTTPAdapter(
@@ -51,10 +85,21 @@ class NHLClient:
             pool_maxsize=25,
             max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
         )
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
-        self._boxscore_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
-        self._boxscore_lock = threading.Lock()
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        return s
+
+    @property
+    def session(self) -> requests.Session:
+        if self._custom_session is not None:
+            return self._custom_session
+        if not hasattr(self._local, "session"):
+            self._local.session = self._create_session()
+        return self._local.session
+
+    @session.setter
+    def session(self, val: Any):
+        self._custom_session = val
 
     def get_standings(self, force: bool = False) -> Dict[str, Dict[str, float]]:
         if not force:
@@ -101,9 +146,9 @@ class NHLClient:
 
         return metrics
 
-    def get_upcoming_schedule(self, force: bool = False) -> List[Dict[str, Any]]:
+    def get_upcoming_schedule(self, force: bool = False, max_age_hours: float = 3.0) -> List[Dict[str, Any]]:
         if not force:
-            cached = self.db.get_schedule()
+            cached = self.db.get_schedule(max_age_hours=max_age_hours)
             if cached:
                 return cached
 
@@ -354,9 +399,9 @@ class NHLClient:
             print(f"Failed to fetch roster for {team_abbrev}: {e}")
         return []
 
-    def get_injuries(self, force: bool = False) -> Dict[Tuple[str, str], Dict[str, str]]:
+    def get_injuries(self, force: bool = False, max_age_hours: float = 3.0) -> Dict[Tuple[str, str], Dict[str, str]]:
         if not force:
-            cached = self.db.get_injuries()
+            cached = self.db.get_injuries(max_age_hours=max_age_hours)
             if cached:
                 return cached
 
@@ -612,8 +657,13 @@ class NHLClient:
                         if pos_id and not pos_id.startswith("G") and not pos_id.startswith("IR"):
                             entry["position"] = pos_id
 
-                    # Namesake alias for Vancouver Elias Pettersson
+                    # Namesake aliases for 3-word names (e.g. Elias Nils Pettersson -> Elias Pettersson)
                     for (nk_item, p_grp), entry in list(lines_data.items()):
+                        words = nk_item.split()
+                        if len(words) == 3:
+                            alias_key = (f"{words[0]} {words[2]}", p_grp)
+                            if alias_key not in lines_data:
+                                lines_data[alias_key] = entry
                         if "elias nils pettersson" in nk_item and p_grp == "D":
                             lines_data[("elias pettersson", "D")] = entry
 

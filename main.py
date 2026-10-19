@@ -465,6 +465,28 @@ def sync_boosters_to_db(db: Database, boosters: Dict[str, float]):
         db.delete_boosters(keys_to_delete)
 
 
+def is_out_status(status: Optional[str]) -> bool:
+    if not status:
+        return False
+    st = status.strip().lower()
+    if st in ("out", "injured reserve", "ir", "suspension", "suspended"):
+        return True
+    if any(k in st for k in ("injured reserve", "suspended", "suspension")):
+        return True
+    return False
+
+
+def is_dtd_status(status: Optional[str]) -> bool:
+    if not status:
+        return False
+    st = status.strip().lower()
+    if st in ("day-to-day", "dtd", "questionable", "doubtful", "gtd", "game-time decision", "game time decision"):
+        return True
+    if any(k in st for k in ("day-to-day", "questionable", "doubtful", "game-time", "gtd")):
+        return True
+    return False
+
+
 def match_injury(
     injuries: Dict[Any, Dict[str, str]],
     player_name: str,
@@ -581,17 +603,18 @@ def collect_slate_skaters(
             if inj:
                 status = inj.get("status")
                 detail = inj.get("detail", "")
-                if status in ("Out", "Injured Reserve", "Suspension"):
+                if is_out_status(status):
                     excluded_count += 1
                     continue
-                elif status == "Day-To-Day" and not has_booster:
+                elif is_dtd_status(status) and not has_booster:
                     dtd_skipped_count += 1
+                    status_lbl = status or "Day-To-Day"
                     dtd_skaters.append({
                         "name": full_name,
                         "display_name": display_name,
                         "team": team,
                         "pos": pos,
-                        "inj_detail": f"{detail} (Day-To-Day)" if detail else "Day-To-Day",
+                        "inj_detail": f"{detail} ({status_lbl})" if detail else status_lbl,
                         "is_dup": is_dup,
                         "is_pos_dup": is_pos_dup,
                         "ev_line": ev_line,
@@ -872,10 +895,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             f_count = sum(1 for p in (p1, p2) if p.get("pos") not in ("D", "DEF"))
             if f_count > 0:
                 syn_rate, label = compute_pair_synergy(p1, p2)
-                p1_r = p1.get("xRRS", p1.get("base_pts", 0.0))
-                p2_r = p2.get("xRRS", p2.get("base_pts", 0.0))
-                base_val = (p1_r * (1.6 + p1.get("booster", 0.0))) + (p2_r * (1.6 + p2.get("booster", 0.0)))
-                dp_syn_diff += base_val * syn_rate
+                dp_syn_diff += (p1["score"] + p2["score"]) * syn_rate
                 for p in dp_with_stack:
                     if p["id"] in (p1["id"], p2["id"]):
                         p["stack"] = label
@@ -898,6 +918,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
         best_pair = None
         best_syn_val = -1.0
         best_base_val = 0.0
+        best_syn_rate = 0.0
         best_label = f"[{team} Pair]"
 
         top_team_cands = plist[:5]
@@ -915,6 +936,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
                 if syn_val > best_syn_val:
                     best_syn_val = syn_val
                     best_base_val = base_val
+                    best_syn_rate = syn_rate
                     best_pair = (p1, p2)
                     best_label = label
 
@@ -925,6 +947,7 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
                 "players": [p1, p2],
                 "base_val": best_base_val,
                 "syn_val": best_syn_val,
+                "syn_rate": best_syn_rate,
                 "label": best_label
             })
 
@@ -953,7 +976,9 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
                 p2b = dict(stack2["players"][1], stack=stack2["label"])
                 five_players = [p1a, p1b, p2a, p2b, remaining[0]]
                 assigned, base_sc = assign_slots(five_players)
-                synergy_sc = round(base_sc + (stack1["syn_val"] - stack1["base_val"]) + (stack2["syn_val"] - stack2["base_val"]), 2)
+                s1_assigned_sc = sum(p["score"] for p in assigned if p["id"] in s1_ids)
+                s2_assigned_sc = sum(p["score"] for p in assigned if p["id"] in s2_ids)
+                synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]) + (s2_assigned_sc * stack2["syn_rate"]), 2)
                 if synergy_sc >= best_syn_score:
                     best_syn_score = synergy_sc
                     best_base_score = base_sc
@@ -967,7 +992,8 @@ def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             p1b = dict(stack1["players"][1], stack=stack1["label"])
             five_players = [p1a, p1b] + remaining[:3]
             assigned, base_sc = assign_slots(five_players)
-            synergy_sc = round(base_sc + (stack1["syn_val"] - stack1["base_val"]), 2)
+            s1_assigned_sc = sum(p["score"] for p in assigned if p["id"] in s1_ids)
+            synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]), 2)
             if synergy_sc >= best_syn_score:
                 best_syn_score = synergy_sc
                 best_base_score = base_sc
@@ -1236,19 +1262,9 @@ def show_history_report(db: Database, target_date: Optional[str] = None):
     print("-" * 88)
     if settled_slates > 0:
         print(f"Total Settled: {settled_slates} slates | Cumulative Payout: {total_actual_rrs:.1f} RRS")
-        pp1_diffs = []
-        other_diffs = []
-        with db._get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT pp_unit, proj_rrs, actual_rrs FROM lineup_history WHERE settled = 1")
-            for row in cur.fetchall():
-                p_rrs = float(row["proj_rrs"] or 0.0)
-                a_rrs = float(row["actual_rrs"] or 0.0)
-                diff = a_rrs - p_rrs
-                if row["pp_unit"] == "PP1":
-                    pp1_diffs.append(diff)
-                else:
-                    other_diffs.append(diff)
+        bias_summary = db.get_role_bias_summary()
+        pp1_diffs = bias_summary.get("pp1_diffs", [])
+        other_diffs = bias_summary.get("other_diffs", [])
         if pp1_diffs or other_diffs:
             pp1_str = f"{sum(pp1_diffs)/len(pp1_diffs):+.2f} RRS (n={len(pp1_diffs)})" if pp1_diffs else "N/A"
             other_str = f"{sum(other_diffs)/len(other_diffs):+.2f} RRS (n={len(other_diffs)})" if other_diffs else "N/A"
@@ -1487,6 +1503,10 @@ def main():
 
     today_str = nhl_today()
     can_save_history = not is_slate_started(games, game_date, today_str)
+
+    if candidates and all(c.get("xRRS", 0.0) == 0.0 for c in candidates):
+        print(f"\n⚠️ Warning: No valid historical projections available for slate {game_date}. All skater projections evaluated to 0.0 (historical game logs prior to {game_date} are missing). Run with a current date or populate historical logs.")
+        return
 
     # 4. Solve optimal 5-slot lineup(s)
     if args.stack:

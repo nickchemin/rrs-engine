@@ -2,6 +2,19 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.4.0] - 2026-10-19
+
+### Added
+- **Slot-Aligned Stack Synergy Computation**: In `solve_stacked_lineup`, pair synergy bonuses are strictly computed from each player's real assigned slot score (`sum(p["score"] for p in assigned_stack) * syn_rate`), eliminating discrepancies from the previous hardcoded 1.6x slot estimate.
+- **Dynamic US Eastern Daylight Saving Time**: Implemented `USEasternTz` in `nhl_api.py` with standard US DST transitions (2nd Sunday of March to 1st Sunday of November), ensuring correct slate dates and times across platforms lacking `zoneinfo`/`tzdata` (EDT UTC-4 in summer, EST UTC-5 in winter).
+- **Expanded ESPN Injury Status Classification**: Defined `is_out_status` and `is_dtd_status` helper functions in `main.py` recognizing `Questionable`, `Doubtful`, `GTD`, `Game-Time Decision`, `Suspension`, and `Injured Reserve`, routing unboostered questionable players to DTD comments instead of false active status.
+- **Thread-Isolated HTTP Sessions**: Converted `NHLClient.session` to thread-local storage (`threading.local`) preventing socket sharing and race conditions during parallel requests while maintaining mockability for tests.
+- **Schedule and Injury Cache TTL**: Added default 3.0-hour cache TTL (`max_age_hours=3.0`) to `get_upcoming_schedule()` and `get_injuries()` in `NHLClient` and `Database`.
+- **Generic 3-Word Name Alias Resolution**: Added automatic middle-name elimination (`words[0] words[2]`) in `NHLClient.get_team_lines` for robust mapping of Daily Faceoff rosters to NHL API namesakes.
+- **Public Database Role Bias Summary API**: Added `Database.get_role_bias_summary()` returning settled empirical differences for PP1 and other deployment units, removing private `_get_connection()` calls from `show_history_report`.
+- **Historical Slate Zero-Projection Guard**: In `main()`, added a validation check warning the user when all skater projections evaluate to 0.0 on past dates (due to missing prior logs), preventing deceptive random 0.0 lineups from being generated or saved.
+- **89 Unit Tests**: Added `TestReviewFixes` test suite covering all architecture review fixes; test suite expanded to 89 tests passing with 100% success.
+
 ## [2.3.1] - 2026-10-18
 
 ### Added

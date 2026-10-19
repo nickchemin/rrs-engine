@@ -19,7 +19,8 @@ from nhl_api import (
     nhl_today,
     current_season_start_year,
     compute_goalie_factor,
-    TEAM_SLUG_MAP
+    TEAM_SLUG_MAP,
+    USEasternTz
 )
 from model import (
     PerformancePredictor,
@@ -42,6 +43,8 @@ from main import (
     is_slate_started,
     build_skater_projection,
     match_injury,
+    is_out_status,
+    is_dtd_status,
     solve_optimal_lineup,
     solve_stacked_lineup,
     compute_pair_synergy,
@@ -51,7 +54,8 @@ from main import (
     settle_past_lineups,
     print_quant_banner,
     print_lineup_table,
-    _warned_ambiguous_names
+    _warned_ambiguous_names,
+    main as main_entry
 )
 
 
@@ -1664,6 +1668,188 @@ class TestQAFourthReview(unittest.TestCase):
         self.assertEqual(rate3, 0.06)
         self.assertEqual(label3, "[EDM Pair]")
         self.assertNotIn("L3", label3)
+
+
+class TestReviewFixes(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test_fixes.db")
+        self.db = Database(self.db_path)
+        self.client = NHLClient(self.db)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    # 1. US Eastern Timezone fallback with accurate DST (EDT vs EST)
+    def test_us_eastern_tz_dst(self):
+        tz = USEasternTz()
+        # Summer (July): EDT, UTC-4
+        summer_dt = datetime(2026, 7, 15, 12, 0, tzinfo=tz)
+        self.assertEqual(summer_dt.utcoffset(), timedelta(hours=-4))
+        self.assertEqual(summer_dt.tzname(), "EDT")
+
+        # Winter (January): EST, UTC-5
+        winter_dt = datetime(2026, 1, 15, 12, 0, tzinfo=tz)
+        self.assertEqual(winter_dt.utcoffset(), timedelta(hours=-5))
+        self.assertEqual(winter_dt.tzname(), "EST")
+
+    # 2. NHLClient.session thread safety
+    def test_nhl_client_session_thread_safety(self):
+        import concurrent.futures
+
+        def get_sess():
+            return id(self.client.session)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(get_sess) for _ in range(8)]
+            results = [f.result() for f in futures]
+
+        # Each thread gets its own Session instance
+        self.assertGreater(len(set(results)), 1)
+
+    # 3. Cache TTL default 3.0 hours for schedule and injuries
+    def test_cache_ttl_max_age(self):
+        # Schedule with max_age_hours
+        with patch.object(self.db, "get_schedule", return_value=[{"date": "2026-10-18"}]) as mock_sched:
+            sched = self.client.get_upcoming_schedule()
+            mock_sched.assert_called_once_with(max_age_hours=3.0)
+
+        # Injuries with max_age_hours
+        with patch.object(self.db, "get_injuries", return_value={}) as mock_inj:
+            inj = self.client.get_injuries()
+            mock_inj.assert_called_once_with(max_age_hours=3.0)
+
+    # 4. Expanded ESPN injury statuses
+    def test_espn_injury_statuses(self):
+        self.assertTrue(is_out_status("Out"))
+        self.assertTrue(is_out_status("Injured Reserve"))
+        self.assertTrue(is_out_status("IR"))
+        self.assertTrue(is_out_status("Suspension"))
+        self.assertTrue(is_out_status("Suspended"))
+        self.assertFalse(is_out_status("Day-To-Day"))
+        self.assertFalse(is_out_status("Questionable"))
+
+        self.assertTrue(is_dtd_status("Day-To-Day"))
+        self.assertTrue(is_dtd_status("Questionable"))
+        self.assertTrue(is_dtd_status("Doubtful"))
+        self.assertTrue(is_dtd_status("GTD"))
+        self.assertTrue(is_dtd_status("Game-Time Decision"))
+        self.assertFalse(is_dtd_status("Out"))
+        self.assertFalse(is_dtd_status("Active"))
+
+        # In collect_slate_skaters: Questionable skater without booster is routed to dtd_skaters
+        skaters = [{"playerId": 10, "firstName": {"default": "Alex"}, "lastName": {"default": "Ovechkin"}, "positionCode": "L", "gamesPlayed": 10, "avgTimeOnIcePerGame": 20.0 * 60}]
+        injuries = {("Alex Ovechkin", "WSH"): {"name": "Alex Ovechkin", "team": "WSH", "status": "Questionable", "detail": "Lower Body"}}
+        with patch.object(self.client, "get_all_club_stats", return_value={"WSH": skaters}):
+            active, dtd, depth, excluded, skipped, _ = collect_slate_skaters(
+                self.client, self.db, {"WSH": ("PIT", True)},
+                goalies={}, injuries=injuries, boosters={},
+                game_date="2026-10-18", today_str="2026-10-18"
+            )
+        self.assertEqual(len(active), 0)
+        self.assertEqual(len(dtd), 1)
+        self.assertEqual(skipped, 1)
+        self.assertIn("Questionable", dtd[0]["inj_detail"])
+
+    # 5. Namesake 3-word alias generation in get_team_lines
+    def test_namesake_alias_three_words(self):
+        raw_html = '''
+        <script id="__NEXT_DATA__" type="application/json">
+        {
+            "props": {
+                "pageProps": {
+                    "combinations": {
+                        "players": [
+                            {"name": "Elias Nils Pettersson", "positionIdentifier": "D", "groupIdentifier": "d3", "categoryIdentifier": "ev"}
+                        ]
+                    }
+                }
+            }
+        }
+        </script>
+        '''
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = raw_html
+        with patch.object(self.client.session, "get", return_value=mock_resp):
+            lines = self.client.get_team_lines("VAN", force=True)
+            self.assertIn(("elias pettersson", "D"), lines)
+
+    # 6. Public db.get_role_bias_summary() and show_history_report
+    def test_db_get_role_bias_summary(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 1, "name": "McDavid", "team": "EDM", "pos": "F", "xRRS": 10.0, "score": 20.0, "pp_unit": "PP1"},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "id": 2, "name": "Hyman", "team": "EDM", "pos": "F", "xRRS": 8.0, "score": 14.4, "pp_unit": "PP2"}
+        ]
+        self.db.save_lineup_history("2026-10-15", "standard", lineup)
+        unsettled = self.db.get_unsettled_history()
+        for r in unsettled:
+            act = 22.0 if r["player_id"] == 1 else 12.4
+            self.db.settle_history_player(r["id"], goals=1.0, assists=1.0, shots=3.0, toi="20:00", actual_xrrs=act, actual_rrs=act)
+
+        summary = self.db.get_role_bias_summary()
+        self.assertEqual(len(summary["pp1_diffs"]), 1)
+        self.assertAlmostEqual(summary["pp1_diffs"][0], 2.0)
+        self.assertEqual(len(summary["other_diffs"]), 1)
+        self.assertAlmostEqual(summary["other_diffs"][0], -2.0)
+
+        # Ensure show_history_report runs without private _get_connection
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            show_history_report(self.db)
+        out = buf.getvalue()
+        self.assertIn("Role Bias Tracking", out)
+        self.assertIn("PP1 Avg Bias: +2.00 RRS", out)
+
+    # 7. Synergy calculation matches assigned slot scores
+    def test_solve_stacked_lineup_synergy_matches_assigned_slot_scores(self):
+        cands = [
+            {"id": 1, "name": "McDavid", "team": "EDM", "pos": "F", "xRRS": 10.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 2, "name": "Draisaitl", "team": "EDM", "pos": "F", "xRRS": 9.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 3, "name": "MacKinnon", "team": "COL", "pos": "F", "xRRS": 8.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"id": 4, "name": "Makar", "team": "COL", "pos": "D", "xRRS": 7.0, "booster": 0.0, "ev_line": "D1", "pp_unit": "PP1"},
+            {"id": 5, "name": "Kucherov", "team": "TBL", "pos": "F", "xRRS": 6.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+        ]
+        lineup, base_score, syn_score = solve_stacked_lineup(cands)
+        edm_players = [p for p in lineup if p["team"] == "EDM"]
+        col_players = [p for p in lineup if p["team"] == "COL"]
+        edm_assigned_score = sum(p["score"] for p in edm_players)
+        col_assigned_score = sum(p["score"] for p in col_players)
+        expected_syn = round(edm_assigned_score * 0.15 + col_assigned_score * 0.13, 2)
+        syn_diff = syn_score - base_score
+        self.assertAlmostEqual(syn_diff, expected_syn, places=2)
+
+    # 8. Past date guard against all-zero projections
+    def test_main_past_date_all_zero_projections_warning(self):
+        cands = [
+            {"id": 1, "name": "Player 1", "team": "EDM", "pos": "F", "xRRS": 0.0, "base_pts": 0.0, "booster": 0.0, "is_home": True, "opp": "CGY", "opp_goalie": "", "goalie_factor": 1.0},
+            {"id": 2, "name": "Player 2", "team": "EDM", "pos": "F", "xRRS": 0.0, "base_pts": 0.0, "booster": 0.0, "is_home": True, "opp": "CGY", "opp_goalie": "", "goalie_factor": 1.0},
+        ]
+        test_args = ["main.py", "--date", "2024-01-01"]
+        mock_sched = [{"date": "2024-01-01", "games": [{"id": 1, "homeTeam": "EDM", "awayTeam": "CGY", "startTimeUTC": "2024-01-01T19:00:00Z"}]}]
+
+        buf = io.StringIO()
+        with patch("sys.argv", test_args), \
+             patch("sys.stdout", buf), \
+             patch("main.NHLClient") as mock_client_cls, \
+             patch("main.Database") as mock_db_cls, \
+             patch("main.collect_slate_skaters", return_value=(cands, [], [], 0, 0, set())), \
+             patch("main.build_skater_projection", return_value=(0.0, 0.0)):
+            mock_client = mock_client_cls.return_value
+            mock_client.get_upcoming_schedule.return_value = mock_sched
+            mock_client.get_standings.return_value = {}
+            mock_client.prefetch_teams_lines.return_value = {}
+            mock_client.get_starting_goalies.return_value = {}
+            mock_client.get_injuries.return_value = {}
+            mock_client.prefetch_players_game_logs.return_value = {}
+            main_entry()
+
+        out = buf.getvalue()
+        self.assertIn("Warning: No valid historical projections available", out)
+        self.assertNotIn("Lineup #1: Standard Optimal", out)
 
 
 if __name__ == "__main__":
