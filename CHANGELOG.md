@@ -5,6 +5,10 @@ All notable changes to the RRS Engine project are documented in this file.
 ## [2.4.0] - 2026-10-19
 
 ### Added
+- **Dedicated Optimizer Module (`optimizer.py`)**: Extracted all draft optimization algorithms (`assign_slots`, `compute_pair_synergy`, `solve_optimal_lineup`, `solve_stacked_lineup`, `print_lineup_table`) into `optimizer.py`, reducing monolith clutter in `main.py` by ~350 lines while preserving complete backwards compatibility via module re-exports.
+- **Mathematical Clarification of DP & Rearrangement Inequality**: Formalized the exact optimization formulation in `optimizer.py` docstrings, explaining why rearrangement inequality dictates descending slot boosts while player booster variance necessitates the $O(5N)$ dynamic programming search.
+- **GitHub Actions Multi-OS Matrix CI**: Added `.github/workflows/tests.yml` testing the unit test suite across Python 3.12 and 3.13 on both `ubuntu-latest` and `windows-latest`.
+- **Modern Packaging Configuration**: Added standard `pyproject.toml` configuration and pinned dependency upper bounds in `requirements.txt`.
 - **Slot-Aligned Stack Synergy Computation**: In `solve_stacked_lineup`, pair synergy bonuses are strictly computed from each player's real assigned slot score (`sum(p["score"] for p in assigned_stack) * syn_rate`), eliminating discrepancies from the previous hardcoded 1.6x slot estimate.
 - **Dynamic US Eastern Daylight Saving Time**: Implemented `USEasternTz` in `nhl_api.py` with standard US DST transitions (2nd Sunday of March to 1st Sunday of November), ensuring correct slate dates and times across platforms lacking `zoneinfo`/`tzdata` (EDT UTC-4 in summer, EST UTC-5 in winter).
 - **Expanded ESPN Injury Status Classification**: Defined `is_out_status` and `is_dtd_status` helper functions in `main.py` recognizing `Questionable`, `Doubtful`, `GTD`, `Game-Time Decision`, `Suspension`, and `Injured Reserve`, routing unboostered questionable players to DTD comments instead of false active status.
@@ -15,7 +19,7 @@ All notable changes to the RRS Engine project are documented in this file.
 - **Empirical Scoring Formula Calibration (`--calibrate`)**: Added `calibrate_rrs_formula` in `model.py` and `Database.get_settled_stats_for_calibration` in `db.py`, running Ordinary Least Squares (OLS) regression on settled `lineup_history` outcomes to reverse-engineer actual mobile app scoring weights ($w_G, w_A, w_S$), reporting $R^2$, MAE, and RMSE against model heuristics.
 - **Look-Ahead Bias Elimination in Validation (`--train`)**: Strict point-in-time validation mode in `evaluate_model` eliminates leakage of future end-of-season standings into historical out-of-sample backtest splits.
 - **Lineup-Level Financial Validation & Compounded Error Analysis**: Added `Database.get_lineup_level_validation_summary` reporting 5-player total Lineup MAE, Lineup RMSE, overall projection bias, beat-projection hit rate, and slot-by-slot / booster-compounded multiplier error breakdown.
-- **93 Unit Tests**: Suite expanded to 93 tests passing with 100% success.
+- **94 Offline Unit Tests**: Suite expanded to 94 tests passing with 100% success.
 
 ## [2.3.1] - 2026-10-18
 

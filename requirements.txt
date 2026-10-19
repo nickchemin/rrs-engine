@@ -1,5 +1,4 @@
-# RRS Engine v2.0 Dependencies
-numpy>=1.24.0
-requests>=2.28.0
+# RRS Engine Dependencies
+numpy>=1.24.0,<2.3.0
+requests>=2.28.0,<3.0.0
 tzdata>=2023.3; sys_platform == "win32"
-

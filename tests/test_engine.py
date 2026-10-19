@@ -30,6 +30,7 @@ from model import (
     calibrate_rrs_formula,
     evaluate_model
 )
+import optimizer
 from main import (
     parse_iso_date_arg,
     parse_history_arg,
@@ -1949,6 +1950,29 @@ class TestReviewFixes(unittest.TestCase):
         self.assertIn(1, summary["slot_avg_errors"])
         self.assertIsNotNone(summary["booster_avg_error"])
         self.assertIsNotNone(summary["no_booster_avg_error"])
+
+    # 13. Optimizer module direct export and equivalence
+    def test_optimizer_module_direct_imports(self):
+        candidates = [
+            {"name": "P1", "team": "EDM", "xRRS": 6.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "P2", "team": "EDM", "xRRS": 5.5, "booster": 0.5, "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "P3", "team": "TOR", "xRRS": 5.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "P4", "team": "TOR", "xRRS": 4.5, "booster": 0.2, "ev_line": "L2", "pp_unit": "PP2", "pos": "F"},
+            {"name": "P5", "team": "BOS", "xRRS": 4.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "P6", "team": "COL", "xRRS": 3.0, "booster": 1.0, "ev_line": "L3", "pp_unit": "NA", "pos": "F"},
+        ]
+        opt_lineup, opt_score = optimizer.solve_optimal_lineup(candidates)
+        main_lineup, main_score = solve_optimal_lineup(candidates)
+        self.assertEqual(len(opt_lineup), 5)
+        self.assertEqual(opt_score, main_score)
+        self.assertEqual([p["name"] for p in opt_lineup], [p["name"] for p in main_lineup])
+
+        opt_stk, opt_base, opt_syn = optimizer.solve_stacked_lineup(candidates)
+        main_stk, main_base, main_syn = solve_stacked_lineup(candidates)
+        self.assertEqual(opt_syn, main_syn)
+        self.assertEqual(opt_base, main_base)
+        self.assertEqual(len(opt_stk), 5)
+        self.assertEqual(optimizer.SLOT_BOOSTS, [2.0, 1.8, 1.6, 1.4, 1.2])
 
 
 if __name__ == "__main__":

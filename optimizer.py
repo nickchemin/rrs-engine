@@ -1,0 +1,353 @@
+"""
+RRS Engine - Lineup Optimizer Module
+Dynamic programming & tournament stacking optimization for NHL Real Sports drafts.
+"""
+
+from collections import Counter
+from typing import Dict, List, Any, Tuple, Optional
+
+
+SLOT_BOOSTS: List[float] = [2.0, 1.8, 1.6, 1.4, 1.2]
+
+
+def assign_slots(players: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
+    """
+    Assigns slot multipliers (2.0x, 1.8x, 1.6x, 1.4x, 1.2x) to up to 5 skaters,
+    ordered in descending order of xRRS (Rearrangement Inequality).
+    Computes individual player scores and detects team stacking tags.
+    """
+    slots = SLOT_BOOSTS
+    sorted_players = sorted(players, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)), reverse=True)
+    assigned = []
+    total_score = 0.0
+
+    team_counts = Counter(p["team"] for p in sorted_players)
+
+    for i in range(min(5, len(sorted_players))):
+        p = sorted_players[i]
+        slot_b = slots[i]
+        tot_b = round(slot_b + p.get("booster", 0.0), 2)
+        p_xrrs = p.get("xRRS", p.get("base_pts", 0.0))
+        score = round(p_xrrs * tot_b, 2)
+        total_score += score
+
+        cnt = team_counts.get(p["team"], 0)
+        custom_stack = p.get("stack")
+        if custom_stack:
+            stack_label = custom_stack
+        elif cnt >= 3:
+            stack_label = f"[{p['team']} x{cnt}]"
+        elif cnt == 2:
+            stack_label = f"[{p['team']} Pair]"
+        else:
+            stack_label = ""
+
+        assigned.append({
+            **p,
+            "slot": i + 1,
+            "slot_boost": slot_b,
+            "total_boost": tot_b,
+            "xRRS": p_xrrs,
+            "score": score,
+            "rrs": score,
+            "stack": stack_label
+        })
+
+    return assigned, round(total_score, 2)
+
+
+def compute_pair_synergy(p1: Dict[str, Any], p2: Dict[str, Any]) -> Tuple[float, str]:
+    """
+    Calculates empirical teammate correlation rate and tag based on line deployment:
+      - PP1 + Same EV line (L1): +15%
+      - PP1 teammates: +13%
+      - Same top even-strength line (L1): +10%
+      - Same second line (L2): +8%
+      - Same secondary power play (PP2): +8%
+      - Generic team pair: +6%
+    Damped with opposing goalie strength factor.
+    """
+    pp1_1 = (p1.get("pp_unit") == "PP1")
+    pp1_2 = (p2.get("pp_unit") == "PP1")
+    ev1 = p1.get("ev_line")
+    ev2 = p2.get("ev_line")
+    same_ev = (ev1 is not None and ev1 == ev2)
+    pp2_1 = (p1.get("pp_unit") == "PP2")
+    pp2_2 = (p2.get("pp_unit") == "PP2")
+
+    team = p1.get("team", "")
+
+    if pp1_1 and pp1_2 and same_ev:
+        rate = 0.15
+        label = f"[{team} {ev1}+PP1]"
+    elif pp1_1 and pp1_2:
+        is_d_f = (p1.get("pos") in ("D", "DEF") or p2.get("pos") in ("D", "DEF"))
+        tag = "PP1 QB+F" if is_d_f else "PP1"
+        rate = 0.13
+        label = f"[{team} {tag}]"
+    elif same_ev and ev1 == "L1":
+        rate = 0.10
+        label = f"[{team} L1]"
+    elif same_ev and ev1 == "L2":
+        rate = 0.08
+        label = f"[{team} L2]"
+    elif pp2_1 and pp2_2:
+        rate = 0.08
+        label = f"[{team} PP2]"
+    else:
+        rate = 0.06
+        label = f"[{team} Pair]"
+
+    g_factor = p1.get("goalie_factor", 1.0)
+    total_rate = rate + 0.12 * (g_factor - 1.0)
+    return max(0.02, total_rate), label
+
+
+def solve_optimal_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
+    """
+    Solves the exact 5-slot draft optimizer problem.
+
+    Mathematical Formulation:
+      Given N candidates each with baseline xRRS x_i and individual booster b_i,
+      and 5 predetermined slots with multipliers s_1 > s_2 > s_3 > s_4 > s_5 (2.0 to 1.2),
+      select a subset of 5 distinct skaters and assign them to slots to maximize:
+        Total Score = sum_{k=1}^5 x_{i_k} * (s_k + b_{i_k})
+                    = sum_{k=1}^5 x_{i_k} * s_k + sum_{k=1}^5 x_{i_k} * b_{i_k}
+
+    By the Rearrangement Inequality, for any chosen 5-element subset, the sum
+    sum_{k=1}^5 x_{i_k} * s_k is strictly maximized by sorting the chosen skaters
+    in descending order of xRRS (assigning largest s_k to largest x_{i_k}).
+
+    However, because boosters b_i vary per skater, a skater with lower xRRS but
+    higher booster may contribute more to the overall objective than a pure top-5
+    xRRS candidate. Sorting candidates by xRRS descending and performing a 5-step
+    dynamic programming transition guarantees finding the globally optimal 5-skater
+    lineup in O(5N) operations while satisfying the rearrangement inequality.
+    """
+    if not candidates:
+        return [], 0.0
+    if len(candidates) <= 5:
+        return assign_slots(candidates)
+
+    sorted_cands = sorted(candidates, key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)), reverse=True)
+    dp: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {0: (0.0, [])}
+
+    for p in sorted_cands:
+        x = p.get("xRRS", p.get("base_pts", 0.0))
+        b = p.get("booster", 0.0)
+        for k in range(4, -1, -1):
+            if k in dp:
+                prev_score, prev_list = dp[k]
+                contrib = x * (SLOT_BOOSTS[k] + b)
+                new_score = prev_score + contrib
+                if k + 1 not in dp or new_score > dp[k + 1][0]:
+                    dp[k + 1] = (new_score, prev_list + [p])
+
+    if 5 in dp:
+        return assign_slots(dp[5][1])
+    return assign_slots(sorted_cands[:5])
+
+
+def _pid(p: Dict[str, Any]) -> Any:
+    return p.get("id", p.get("name"))
+
+
+def solve_stacked_lineup(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float, float]:
+    """
+    Tournament stack optimizer identifying high-correlation offensive combinations
+    (Option A: 2 stacks + 1 standalone, Option B: 1 stack + 3 standalones).
+    Synergy bonuses are calculated strictly using real assigned slot scores.
+    Guarantees tournament upside score >= standard DP base score.
+    """
+    if len(candidates) < 5:
+        lineup, score = solve_optimal_lineup(candidates)
+        return lineup, score, score
+
+    # Baseline: DP optimal lineup guarantees upside >= standard DP base score
+    dp_lineup, dp_base = solve_optimal_lineup(candidates)
+    dp_syn_diff = 0.0
+    dp_with_stack = [dict(p) for p in dp_lineup]
+    dp_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    for p in dp_lineup:
+        dp_by_team.setdefault(p["team"], []).append(p)
+    for team, plist in dp_by_team.items():
+        if len(plist) >= 2:
+            p1, p2 = plist[0], plist[1]
+            f_count = sum(1 for p in (p1, p2) if p.get("pos") not in ("D", "DEF"))
+            if f_count > 0:
+                syn_rate, label = compute_pair_synergy(p1, p2)
+                dp_syn_diff += (p1["score"] + p2["score"]) * syn_rate
+                for p in dp_with_stack:
+                    if _pid(p) in (_pid(p1), _pid(p2)):
+                        p["stack"] = label
+
+    best_lineup = dp_with_stack
+    best_base_score = dp_base
+    best_syn_score = round(dp_base + dp_syn_diff, 2)
+
+    by_team: Dict[str, List[Dict[str, Any]]] = {}
+    for c in candidates:
+        by_team.setdefault(c["team"], []).append(c)
+
+    for t in by_team:
+        by_team[t].sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+
+    viable_stacks = []
+    for team, plist in by_team.items():
+        if len(plist) < 2:
+            continue
+        best_pair = None
+        best_syn_val = -1.0
+        best_base_val = 0.0
+        best_syn_rate = 0.0
+        best_label = f"[{team} Pair]"
+
+        top_team_cands = plist[:5]
+        for idx1 in range(len(top_team_cands)):
+            for idx2 in range(idx1 + 1, len(top_team_cands)):
+                p1, p2 = top_team_cands[idx1], top_team_cands[idx2]
+                f_count = sum(1 for p in (p1, p2) if p.get("pos") not in ("D", "DEF"))
+                if f_count == 0:
+                    continue
+                p1_r = p1.get("xRRS", p1.get("base_pts", 0.0))
+                p2_r = p2.get("xRRS", p2.get("base_pts", 0.0))
+                base_val = (p1_r * (1.6 + p1.get("booster", 0.0))) + (p2_r * (1.6 + p2.get("booster", 0.0)))
+                syn_rate, label = compute_pair_synergy(p1, p2)
+                syn_val = base_val * (1.0 + syn_rate)
+                if syn_val > best_syn_val:
+                    best_syn_val = syn_val
+                    best_base_val = base_val
+                    best_syn_rate = syn_rate
+                    best_pair = (p1, p2)
+                    best_label = label
+
+        if best_pair:
+            p1, p2 = best_pair
+            viable_stacks.append({
+                "team": team,
+                "players": [p1, p2],
+                "base_val": best_base_val,
+                "syn_val": best_syn_val,
+                "syn_rate": best_syn_rate,
+                "label": best_label
+            })
+
+    viable_stacks.sort(key=lambda x: x["syn_val"], reverse=True)
+    top_stacks = viable_stacks[:8]
+
+    if not top_stacks:
+        return best_lineup, best_base_score, best_syn_score
+
+    for i in range(len(top_stacks)):
+        stack1 = top_stacks[i]
+        s1_ids = {_pid(p) for p in stack1["players"]}
+
+        # Option A: Stack 1 + Stack 2 + 1 standalone
+        for stack2 in top_stacks[i + 1:]:
+            if stack2["team"] == stack1["team"]:
+                continue
+            s2_ids = {_pid(p) for p in stack2["players"]}
+            combined_ids = s1_ids | s2_ids
+            remaining = [c for c in candidates if _pid(c) not in combined_ids]
+            if remaining:
+                remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+                p1a = dict(stack1["players"][0], stack=stack1["label"])
+                p1b = dict(stack1["players"][1], stack=stack1["label"])
+                p2a = dict(stack2["players"][0], stack=stack2["label"])
+                p2b = dict(stack2["players"][1], stack=stack2["label"])
+                five_players = [p1a, p1b, p2a, p2b, remaining[0]]
+                assigned, base_sc = assign_slots(five_players)
+                s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
+                s2_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s2_ids)
+                synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]) + (s2_assigned_sc * stack2["syn_rate"]), 2)
+                if synergy_sc >= best_syn_score:
+                    best_syn_score = synergy_sc
+                    best_base_score = base_sc
+                    best_lineup = assigned
+
+        # Option B: Stack 1 + 3 standalone players
+        remaining = [c for c in candidates if _pid(c) not in s1_ids]
+        if len(remaining) >= 3:
+            remaining.sort(key=lambda x: x.get("xRRS", x.get("base_pts", 0.0)) * (1.6 + x.get("booster", 0.0)), reverse=True)
+            p1a = dict(stack1["players"][0], stack=stack1["label"])
+            p1b = dict(stack1["players"][1], stack=stack1["label"])
+            five_players = [p1a, p1b] + remaining[:3]
+            assigned, base_sc = assign_slots(five_players)
+            s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
+            synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]), 2)
+            if synergy_sc >= best_syn_score:
+                best_syn_score = synergy_sc
+                best_base_score = base_sc
+                best_lineup = assigned
+
+    if not best_lineup:
+        lineup, score = solve_optimal_lineup(candidates)
+        return lineup, score, score
+
+    return best_lineup, best_base_score, best_syn_score
+
+
+def print_lineup_table(
+    date_str: str,
+    lineup: List[Dict[str, Any]],
+    total_score: float,
+    title: str = "Standard Optimal (Max Base EV)",
+    synergy_score: Optional[float] = None
+):
+    """
+    Renders formatted ASCII table of the 5-slot lineup with slot boosts,
+    player boosters, expected fantasy payouts, and line tags.
+    """
+    if not lineup:
+        print("\nNo lineup available to display.\n")
+        return
+
+    has_stacks = any(item.get("stack") for item in lineup)
+    width = 120 if has_stacks else 109
+
+    print("\n" + "=" * width)
+    header = f"Date: {date_str} | Projected: {total_score:.1f} RRS | Mode: {title}"
+    if synergy_score and synergy_score > total_score:
+        header += f" | Upside: {synergy_score:.1f} RRS"
+    print(header)
+    print("=" * width)
+
+    if has_stacks:
+        print(f"{'Slot':<5} {'Slot Boost':<11} {'Player':<22} {'Team':<5} {'Line':<9} {'Opp (Goalie)':<22} {'xRRS':<8} {'Booster':<9} {'Total':<7} {'RRS Payout':<13} {'Synergy'}")
+    else:
+        print(f"{'Slot':<5} {'Slot Boost':<11} {'Player':<22} {'Team':<5} {'Line':<9} {'Opp (Goalie)':<22} {'xRRS':<8} {'Booster':<9} {'Total':<7} {'RRS Payout'}")
+    print("-" * width)
+
+    for item in lineup:
+        slot_str = f"#{item['slot']}"
+        s_boost = f"{item['slot_boost']:.1f}x"
+        p_boost = f"+{item['booster']:.1f}x"
+        tot_boost = f"{item['total_boost']:.1f}x"
+        p_xrrs = item.get("xRRS", item.get("base_pts", 0.0))
+        score_str = f"{item['score']:.1f} RRS"
+        p_name = item.get("display_name") or item["name"]
+        line_str = item.get("line_tag") or item.get("line") or "--"
+        g_name = item.get("opp_goalie", "")
+        if g_name and " " in g_name:
+            parts = g_name.split()
+            short_g = f"{parts[0][0]}. {parts[-1]}"
+        else:
+            short_g = g_name
+        opp_str = f"{item['opp']} ({short_g})" if short_g else item['opp']
+        stack_str = item.get("stack", "")
+
+        if has_stacks:
+            print(f"{slot_str:<5} {s_boost:<11} {p_name:<22} {item['team']:<5} {line_str:<9} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13} {stack_str}")
+        else:
+            print(f"{slot_str:<5} {s_boost:<11} {p_name:<22} {item['team']:<5} {line_str:<9} {opp_str:<22} {p_xrrs:<8.1f} {p_boost:<9} {tot_boost:<7} {score_str:<13}")
+
+    print("-" * width)
+    top_p = max(lineup, key=lambda x: x["score"]) if lineup else None
+    top_name = (top_p.get("display_name") or top_p["name"]) if top_p else ""
+    stacks_found = [p['stack'] for p in lineup if p.get('stack')]
+    if stacks_found:
+        unique_stacks = sorted(list(set(stacks_found)))
+        print(f"⚡ Quant Summary: Top EV driver {top_name} ({top_p['total_boost']:.1f}x Boost) | Synergistic {', '.join(unique_stacks)} upside stack")
+    elif top_p:
+        print(f"⚡ Quant Summary: Anchor play {top_name} ({top_p['total_boost']:.1f}x Boost) | Projected Lineup Total: {total_score:.1f} RRS")
+    print("=" * width + "\n")
