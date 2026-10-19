@@ -26,7 +26,9 @@ from model import (
     PerformancePredictor,
     calculate_rrs_from_stats,
     calculate_xrrs_projection,
-    compute_line_factor
+    compute_line_factor,
+    calibrate_rrs_formula,
+    evaluate_model
 )
 from main import (
     parse_iso_date_arg,
@@ -1850,6 +1852,103 @@ class TestReviewFixes(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("Warning: No valid historical projections available", out)
         self.assertNotIn("Lineup #1: Standard Optimal", out)
+
+
+    # 9. OLS empirical calibration with settled history
+    def test_calibrate_rrs_formula_with_settled_history(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 1, "name": "P1", "team": "EDM", "pos": "F", "xRRS": 5.0, "score": 10.0},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "id": 2, "name": "P2", "team": "EDM", "pos": "F", "xRRS": 4.0, "score": 7.2},
+            {"slot": 3, "slot_boost": 1.6, "total_boost": 1.6, "id": 3, "name": "P3", "team": "EDM", "pos": "F", "xRRS": 3.0, "score": 4.8},
+            {"slot": 4, "slot_boost": 1.4, "total_boost": 1.4, "id": 4, "name": "P4", "team": "EDM", "pos": "F", "xRRS": 2.5, "score": 3.5},
+            {"slot": 5, "slot_boost": 1.2, "total_boost": 1.2, "id": 5, "name": "P5", "team": "EDM", "pos": "F", "xRRS": 2.0, "score": 2.4},
+        ]
+        self.db.save_lineup_history("2026-10-10", "standard", lineup)
+        lineup2 = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "id": 6, "name": "P6", "team": "COL", "pos": "F", "xRRS": 5.0, "score": 10.0}
+        ]
+        self.db.save_lineup_history("2026-10-11", "standard", lineup2)
+
+        data = [
+            (1, 2.0, 1.0, 4.0),
+            (2, 1.0, 2.0, 3.0),
+            (3, 0.0, 3.0, 5.0),
+            (4, 3.0, 0.0, 6.0),
+            (5, 0.0, 0.0, 2.0),
+            (6, 1.0, 1.0, 1.0)
+        ]
+        unsettled = self.db.get_unsettled_history()
+        for idx, (p_id, g, a, s) in enumerate(data):
+            r = next(item for item in unsettled if item["player_id"] == p_id)
+            rrs_val = 3.0 * g + 1.2 * a + 0.25 * s
+            self.db.settle_history_player(r["id"], goals=g, assists=a, shots=s, toi="18:00", actual_xrrs=rrs_val, actual_rrs=rrs_val)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            res = calibrate_rrs_formula(self.db)
+        self.assertIsNotNone(res)
+        self.assertAlmostEqual(res["weights"]["goals"], 3.0, delta=0.01)
+        self.assertAlmostEqual(res["weights"]["assists"], 1.2, delta=0.01)
+        self.assertAlmostEqual(res["weights"]["shots"], 0.25, delta=0.01)
+        self.assertGreater(res["r2"], 0.99)
+        self.assertIn("REAL SPORTS RRS EMPIRICAL FORMULA CALIBRATION", buf.getvalue())
+
+    # 10. OLS empirical calibration with insufficient records
+    def test_calibrate_rrs_formula_insufficient_samples(self):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            res = calibrate_rrs_formula(self.db)
+        self.assertIsNone(res)
+        self.assertIn("No settled player records found", buf.getvalue())
+
+    # 11. Point-in-time evaluate_model eliminates look-ahead bias
+    def test_evaluate_model_point_in_time(self):
+        self.db.save_player(99, "Star Skater", "EDM", "F")
+        logs = []
+        for i in range(35):
+            logs.append({
+                "gameId": 1000 + i,
+                "gameDate": f"2025-10-{i+1:02d}" if i < 30 else f"2025-11-{i-29:02d}",
+                "season": "20252026",
+                "homeRoadFlag": "H" if i % 2 == 0 else "R",
+                "opponent": "CGY",
+                "opponentAbbrev": "CGY",
+                "goals": 1 if i % 3 == 0 else 0,
+                "assists": 1 if i % 2 == 0 else 0,
+                "shots": 3,
+                "toi": "18:00",
+                "toi_minutes": 18.0
+            })
+        self.db.save_game_logs(99, logs)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            evaluate_model(self.db, standings={"CGY": {"defense_factor": 0.5}}, min_games=30, point_in_time=True)
+        out = buf.getvalue()
+        self.assertIn("Validation Results", out)
+        self.assertIn("Strict point-in-time (no look-ahead leakage)", out)
+        self.assertIn("Goals (MAE):", out)
+
+    # 12. Lineup-level validation summary and compounded multiplier metrics
+    def test_lineup_level_validation_summary(self):
+        lineup1 = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.5, "id": 101, "name": "P1", "team": "EDM", "pos": "F", "xRRS": 5.0, "score": 12.5, "booster": 0.5},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "id": 102, "name": "P2", "team": "EDM", "pos": "F", "xRRS": 4.0, "score": 7.2, "booster": 0.0},
+        ]
+        self.db.save_lineup_history("2026-10-12", "standard", lineup1)
+        unsettled = self.db.get_unsettled_history()
+        for r in unsettled:
+            act = 15.0 if r["player_id"] == 101 else 6.0
+            self.db.settle_history_player(r["id"], goals=1, assists=1, shots=3, toi="19:00", actual_xrrs=act, actual_rrs=act)
+
+        summary = self.db.get_lineup_level_validation_summary()
+        self.assertEqual(summary["settled_count"], 1)
+        self.assertEqual(summary["hit_rate"], 1.0)
+        self.assertAlmostEqual(summary["lineup_mae"], 1.3, delta=0.01)
+        self.assertAlmostEqual(summary["lineup_bias"], 1.3, delta=0.01)
+        self.assertIn(1, summary["slot_avg_errors"])
+        self.assertIsNotNone(summary["booster_avg_error"])
+        self.assertIsNotNone(summary["no_booster_avg_error"])
 
 
 if __name__ == "__main__":

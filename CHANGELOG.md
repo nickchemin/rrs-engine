@@ -12,8 +12,10 @@ All notable changes to the RRS Engine project are documented in this file.
 - **Schedule and Injury Cache TTL**: Added default 3.0-hour cache TTL (`max_age_hours=3.0`) to `get_upcoming_schedule()` and `get_injuries()` in `NHLClient` and `Database`.
 - **Generic 3-Word Name Alias Resolution**: Added automatic middle-name elimination (`words[0] words[2]`) in `NHLClient.get_team_lines` for robust mapping of Daily Faceoff rosters to NHL API namesakes.
 - **Public Database Role Bias Summary API**: Added `Database.get_role_bias_summary()` returning settled empirical differences for PP1 and other deployment units, removing private `_get_connection()` calls from `show_history_report`.
-- **Historical Slate Zero-Projection Guard**: In `main()`, added a validation check warning the user when all skater projections evaluate to 0.0 on past dates (due to missing prior logs), preventing deceptive random 0.0 lineups from being generated or saved.
-- **89 Unit Tests**: Added `TestReviewFixes` test suite covering all architecture review fixes; test suite expanded to 89 tests passing with 100% success.
+- **Empirical Scoring Formula Calibration (`--calibrate`)**: Added `calibrate_rrs_formula` in `model.py` and `Database.get_settled_stats_for_calibration` in `db.py`, running Ordinary Least Squares (OLS) regression on settled `lineup_history` outcomes to reverse-engineer actual mobile app scoring weights ($w_G, w_A, w_S$), reporting $R^2$, MAE, and RMSE against model heuristics.
+- **Look-Ahead Bias Elimination in Validation (`--train`)**: Strict point-in-time validation mode in `evaluate_model` eliminates leakage of future end-of-season standings into historical out-of-sample backtest splits.
+- **Lineup-Level Financial Validation & Compounded Error Analysis**: Added `Database.get_lineup_level_validation_summary` reporting 5-player total Lineup MAE, Lineup RMSE, overall projection bias, beat-projection hit rate, and slot-by-slot / booster-compounded multiplier error breakdown.
+- **93 Unit Tests**: Suite expanded to 93 tests passing with 100% success.
 
 ## [2.3.1] - 2026-10-18
 

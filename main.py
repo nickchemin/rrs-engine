@@ -13,6 +13,7 @@ from model import (
     PerformancePredictor,
     POS_AVERAGES,
     evaluate_model,
+    calibrate_rrs_formula,
     calculate_xrrs_projection,
     calculate_rrs_from_stats,
     compute_line_factor
@@ -1359,6 +1360,7 @@ def main():
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     parser.add_argument("--date", type=parse_iso_date_arg, default="", help="Target date (YYYY-MM-DD), default is current day")
     parser.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
+    parser.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
     parser.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
     args = parser.parse_args()
 
@@ -1366,6 +1368,8 @@ def main():
         mode_label = "Sync Roster & Boosters"
     elif args.train:
         mode_label = "Model Validation & Backtest"
+    elif args.calibrate:
+        mode_label = "Empirical Scoring Calibration"
     elif args.history is not None:
         mode_label = "Performance Tracking & History"
     elif args.stack:
@@ -1386,6 +1390,10 @@ def main():
         target_d = args.history if args.history != "all" else None
         show_history_report(db, target_date=target_d)
         load_or_fetch_standings(client)
+        return
+
+    if args.calibrate:
+        calibrate_rrs_formula(db)
         return
 
     if args.train:

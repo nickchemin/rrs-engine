@@ -213,8 +213,9 @@ class PerformancePredictor:
         targets = {k: np.array(v, dtype=np.float64) for k, v in y_dict.items()}
         return X, targets
 
-    def train(self, game_logs: List[Dict[str, Any]], standings: Dict[str, Dict[str, float]]):
-        X, y_dict = self._extract_dataset(game_logs, standings)
+    def train(self, game_logs: List[Dict[str, Any]], standings: Optional[Dict[str, Dict[str, float]]] = None):
+        st = standings or {}
+        X, y_dict = self._extract_dataset(game_logs, st)
 
         if game_logs:
             parsed_tois = [parse_toi(g.get("toi", "00:00")) for g in game_logs]
@@ -242,7 +243,7 @@ class PerformancePredictor:
         is_home: bool,
         opponent_abbrev: str,
         game_date: str,
-        standings: Dict[str, Dict[str, float]],
+        standings: Optional[Dict[str, Dict[str, float]]] = None,
         position: str = "F",
         goalie_factor: float = 1.0,
         ev_line: Optional[str] = None,
@@ -251,7 +252,7 @@ class PerformancePredictor:
     ) -> Dict[str, Any]:
         pos_key = "D" if str(position).upper() in ("D", "DEF") else "F"
         pos_avg = POS_AVERAGES[pos_key]
-        opp_info = standings.get(opponent_abbrev, {})
+        opp_info = (standings or {}).get(opponent_abbrev, {})
         opp_def = float(opp_info.get("defense_factor", 1.0))
         home_boost = 1.05 if is_home else 0.95
 
@@ -446,12 +447,84 @@ def calculate_rrs_from_stats(
     return round(min(10.0, max(0.0, base)), 1)
 
 
-def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: int = 30):
+def calibrate_rrs_formula(db: Any) -> Optional[Dict[str, Any]]:
+    records = db.get_settled_stats_for_calibration() if hasattr(db, "get_settled_stats_for_calibration") else []
+    if not records:
+        print("\n⚠️ No settled player records found in lineup_history. Accumulate match outcomes to run empirical calibration.\n")
+        return None
+
+    valid = []
+    for r in records:
+        g = r.get("actual_goals")
+        a = r.get("actual_assists")
+        s = r.get("actual_shots")
+        rrs = r.get("actual_rrs")
+        if g is not None and a is not None and s is not None and rrs is not None:
+            valid.append((float(g), float(a), float(s), float(rrs)))
+
+    if len(valid) < 5:
+        print(f"\n⚠️ Need at least 5 settled records for empirical regression calibration (found {len(valid)}).")
+        print("Run with --history or allow slate settlement to collect more data points.\n")
+        return None
+
+    G = np.array([v[0] for v in valid], dtype=np.float64)
+    A = np.array([v[1] for v in valid], dtype=np.float64)
+    S = np.array([v[2] for v in valid], dtype=np.float64)
+    Y = np.array([v[3] for v in valid], dtype=np.float64)
+
+    X = np.column_stack([G, A, S])
+    weights, residuals, rank, s_vals = np.linalg.lstsq(X, Y, rcond=None)
+    w_g, w_a, w_s = float(weights[0]), float(weights[1]), float(weights[2])
+
+    y_pred = X @ weights
+    ss_tot = np.sum((Y - np.mean(Y)) ** 2)
+    ss_res = np.sum((Y - y_pred) ** 2)
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
+    mae = float(np.mean(np.abs(Y - y_pred)))
+    rmse = float(np.sqrt(np.mean((Y - y_pred) ** 2)))
+
+    result = {
+        "n_samples": len(valid),
+        "weights": {
+            "goals": round(w_g, 3),
+            "assists": round(w_a, 3),
+            "shots": round(w_s, 3),
+        },
+        "r2": round(r2, 4),
+        "mae": round(mae, 3),
+        "rmse": round(rmse, 3)
+    }
+
+    print("\n" + "=" * 80)
+    print("           REAL SPORTS RRS EMPIRICAL FORMULA CALIBRATION (OLS)")
+    print("=" * 80)
+    print(f"Sample Size: {len(valid)} settled match boxscores from lineup_history")
+    print("\nEstimated Event Weights vs Current Model Heuristics:")
+    print(f"  • Goal Weight (w_G):    {w_g:+.3f}  (Model Heuristic: +2.50 to +3.00)")
+    print(f"  • Assist Weight (w_A):  {w_a:+.3f}  (Model Heuristic: +1.00 to +1.05)")
+    print(f"  • Shot Weight (w_S):    {w_s:+.3f}  (Model Heuristic: +0.25)")
+    print("\nGoodness of Fit:")
+    print(f"  • R² (Variance Explained): {r2:.4f}")
+    print(f"  • Mean Absolute Error:     {mae:.3f} RRS")
+    print(f"  • Root Mean Squared Error: {rmse:.3f} RRS")
+    print("=" * 80 + "\n")
+
+    return result
+
+
+def evaluate_model(
+    db: Any,
+    standings: Optional[Dict[str, Dict[str, float]]] = None,
+    min_games: int = 30,
+    point_in_time: bool = True
+):
     print("Evaluating model accuracy on out-of-sample test splits...")
-    players = db.get_all_players()
+    players = db.get_all_players() if hasattr(db, "get_all_players") else []
     if not players:
         print("No players found in database.")
         return
+
+    pit_standings = {} if point_in_time else (standings or {})
 
     errors = {"goals": [], "assists": [], "shots": [], "toi": []}
     base_errors = {"goals": [], "assists": [], "shots": [], "toi": []}
@@ -468,7 +541,7 @@ def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: i
         test_logs = logs[split:]
 
         model = PerformancePredictor()
-        model.train(train_logs, standings)
+        model.train(train_logs, pit_standings)
 
         for i, test_game in enumerate(test_logs):
             history = logs[:split + i]
@@ -477,7 +550,7 @@ def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: i
                 is_home=(test_game.get("homeRoadFlag") == "H"),
                 opponent_abbrev=test_game.get("opponentAbbrev", ""),
                 game_date=test_game.get("gameDate", "2026-01-01"),
-                standings=standings,
+                standings=pit_standings,
                 position=p.get("position", "F")
             )
 
@@ -510,11 +583,27 @@ def evaluate_model(db: Any, standings: Dict[str, Dict[str, float]], min_games: i
         print("Not enough game logs found to evaluate model.")
         return
 
-    print("-" * 62)
-    print(f"Validation Results ({tested_players} players, {len(errors['goals'])} test games):")
+    print("-" * 68)
+    leak_note = "Strict point-in-time (no look-ahead leakage)" if point_in_time else "End-of-season standings (with look-ahead)"
+    print(f"Validation Results: {tested_players} players, {len(errors['goals'])} test games [{leak_note}]:")
     print(f"  Goals (MAE):    {np.mean(errors['goals']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['goals']):.3f})")
     print(f"  Assists (MAE):  {np.mean(errors['assists']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['assists']):.3f})")
     print(f"  Shots (MAE):    {np.mean(errors['shots']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['shots']):.3f})")
     print(f"  TOI (MAE):      {np.mean(errors['toi']):.2f} min       (Baseline 20-game avg: {np.mean(base_errors['toi']):.2f} min)")
-    print("  * Note: Standings defense factor used for historical games reflects current standings.")
-    print("-" * 62)
+    print("-" * 68)
+
+    # Lineup-level validation report
+    if hasattr(db, "get_lineup_level_validation_summary"):
+        lineup_sum = db.get_lineup_level_validation_summary()
+        if lineup_sum.get("settled_count", 0) > 0:
+            print(f"\nLineup-Level Validation ({lineup_sum['settled_count']} settled slates, {lineup_sum['total_players']} players):")
+            print(f"  Lineup Total MAE:       {lineup_sum['lineup_mae']:.2f} RRS")
+            print(f"  Lineup Total RMSE:      {lineup_sum['lineup_rmse']:.2f} RRS")
+            print(f"  Overall Projection Bias:{lineup_sum['lineup_bias']:+.2f} RRS")
+            print(f"  Beat-Projection Rate:   {lineup_sum['hit_rate']*100:.1f}%")
+            if lineup_sum.get("slot_avg_errors"):
+                slot_strs = [f"#{s}: {err:.1f}" for s, err in sorted(lineup_sum['slot_avg_errors'].items())]
+                print(f"  Compounded Error by Slot: {', '.join(slot_strs)}")
+            if lineup_sum.get("booster_avg_error") is not None and lineup_sum.get("no_booster_avg_error") is not None:
+                print(f"  Booster Compounding: Boosted Avg Error {lineup_sum['booster_avg_error']:.2f} RRS vs Unboosted {lineup_sum['no_booster_avg_error']:.2f} RRS")
+            print("-" * 68)

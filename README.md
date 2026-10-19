@@ -69,7 +69,8 @@ python -m unittest discover -s tests -v
 | `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific date. |
 | `python main.py --history` | Performance tracking table with cumulative profit and settled status. |
 | `python main.py --history YYYY-MM-DD` | Detailed box score breakdown for a specific date. |
-| `python main.py --train` | Runs out-of-sample machine learning validation vs. 20-game baseline. |
+| `python main.py --calibrate` | Runs OLS empirical regression to reverse-engineer app scoring weights from settled history. |
+| `python main.py --train` | Runs out-of-sample ML and lineup-level validation (strictly point-in-time, no look-ahead bias). |
 
 ## License
 

@@ -903,3 +903,74 @@ class Database:
                 "pp1_diffs": pp1_diffs,
                 "other_diffs": other_diffs
             }
+
+    def get_settled_stats_for_calibration(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    id, game_date, mode, slot, slot_boost, player_id, player_name,
+                    team, opponent, ev_line, pp_unit, booster, total_boost,
+                    proj_xrrs, proj_rrs, actual_goals, actual_assists, actual_shots,
+                    actual_toi, actual_xrrs, actual_rrs
+                FROM lineup_history
+                WHERE settled = 1 AND actual_rrs IS NOT NULL
+                ORDER BY game_date ASC, slot ASC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_lineup_level_validation_summary(self) -> Dict[str, Any]:
+        slates = self.get_history_slates()
+        settled_slates = [s for s in slates if s.get("all_settled")]
+        if not settled_slates:
+            return {"settled_count": 0}
+
+        diffs = []
+        actuals = []
+        projs = []
+        hit_count = 0
+
+        for s in settled_slates:
+            p = float(s.get("total_proj_rrs") or 0.0)
+            a = float(s.get("total_actual_rrs") or 0.0)
+            diff = a - p
+            diffs.append(diff)
+            actuals.append(a)
+            projs.append(p)
+            if a >= p:
+                hit_count += 1
+
+        n_slates = len(settled_slates)
+        mae = sum(abs(d) for d in diffs) / n_slates
+        rmse = (sum(d ** 2 for d in diffs) / n_slates) ** 0.5
+        bias = sum(diffs) / n_slates
+        hit_rate = hit_count / n_slates
+
+        stats = self.get_settled_stats_for_calibration()
+        slot_errors: Dict[int, List[float]] = {}
+        booster_errors: List[float] = []
+        no_booster_errors: List[float] = []
+
+        for item in stats:
+            p_rrs = float(item.get("proj_rrs") or 0.0)
+            a_rrs = float(item.get("actual_rrs") or 0.0)
+            err = abs(a_rrs - p_rrs)
+            slot = int(item.get("slot", 1))
+            slot_errors.setdefault(slot, []).append(err)
+            b = float(item.get("booster") or 0.0)
+            if b > 0.0:
+                booster_errors.append(err)
+            else:
+                no_booster_errors.append(err)
+
+        return {
+            "settled_count": n_slates,
+            "total_players": len(stats),
+            "lineup_mae": round(mae, 2),
+            "lineup_rmse": round(rmse, 2),
+            "lineup_bias": round(bias, 2),
+            "hit_rate": round(hit_rate, 4),
+            "slot_avg_errors": {s: round(sum(errs) / len(errs), 2) for s, errs in sorted(slot_errors.items()) if errs},
+            "booster_avg_error": round(sum(booster_errors) / len(booster_errors), 2) if booster_errors else None,
+            "no_booster_avg_error": round(sum(no_booster_errors) / len(no_booster_errors), 2) if no_booster_errors else None,
+        }
