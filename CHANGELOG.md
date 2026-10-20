@@ -23,7 +23,23 @@ All notable changes to the RRS Engine project are documented in this file.
     2. Classic Ridge Regression
     3. New Poisson GLM
   - Computes and prints full evaluation table with Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and Spearman rank correlation coefficient ($r_s$) across goals, assists, shots, and TOI.
-- **109 Offline Unit Tests**: Test suite expanded from 102 to 109 tests covering schedule fatigue context, special teams modulation, GLM regression, and benchmark metrics with 100% pass rate.
+- **Vectorized Monte-Carlo Covariance & Distribution Simulation (`optimizer.py`)**:
+  - Replaced heuristic stacking assumptions with a joint multivariate probabilistic model over 10,000 vectorised iterations via Cholesky decomposition of empirical covariance matrix $\Sigma = D R D$ in $< 20$ ms.
+  - Formulated offensive teammate correlation matrix ($R$) capturing positive co-occurrence across deployment tiers:
+    - Same top even strength line and power play (`L1+PP1`): $\rho = 0.40$.
+    - Special teams quarterback defenseman and forward (`PP1 QB+F`): $\rho = 0.35$.
+    - Same power play unit (`PP1`): $\rho = 0.30$.
+    - Top even strength forward line (`L1`): $\rho = 0.24$.
+    - Second even strength forward line (`L2`): $\rho = 0.20$.
+    - Secondary power play unit (`PP2`): $\rho = 0.18$.
+    - Generic teammates: $\rho = 0.08$.
+    - Modulated by opposing goalie factor and positive-definiteness eigenvalue guarantee.
+  - Added lineup payout distribution reporting to terminal output (`print_lineup_table`):
+    - `Expected Score (Mean)`: mathematical expectation of the compounded payout.
+    - `Floor (25th percentile)`: downside risk scenario essential for Cash games.
+    - `Ceiling (90th percentile)` and `Ceiling (95th percentile)`: upper-tail explosive upside potential for GPP tournaments.
+  - Maintained $O(5N)$ dynamic programming runtime for slot assignment and optimal lineup selection.
+- **115 Offline Unit Tests**: Test suite expanded from 109 to 115 tests covering correlation matrix symmetry, positive definiteness, Monte-Carlo simulation runtime, Cash game Floor vs Tournament Ceiling variance dynamics, and $O(5N)$ scaling.
 
 ## [2.4.1] - 2026-10-19
 

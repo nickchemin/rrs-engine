@@ -6,6 +6,8 @@ import tempfile
 import argparse
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
+import time
+import numpy as np
 
 # Ensure repo root is on sys.path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +33,11 @@ from model import (
     evaluate_model
 )
 import optimizer
+from optimizer import (
+    compute_pair_correlation,
+    build_lineup_correlation_matrix,
+    simulate_lineup_distribution
+)
 from main import (
     parse_iso_date_arg,
     parse_history_arg,
@@ -2353,6 +2360,152 @@ class TestPhase1FeatureEngineering(unittest.TestCase):
         self.assertIn("Classic (Ridge)", out)
         self.assertIn("New (Poisson GLM)", out)
         self.assertIn("Spearman (r_s)", out)
+
+
+class TestPhase2MonteCarloOptimizer(unittest.TestCase):
+    def test_compute_pair_correlation_line_and_positions(self):
+        # Different teams -> 0.0
+        p_edm = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"}
+        p_col = {"team": "COL", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm, p_col), 0.0)
+
+        # Same team, L1 + PP1
+        p_edm_f1 = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"}
+        p_edm_f2 = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_f1, p_edm_f2), 0.40)
+
+        # Same team, PP1 QB (D) + PP1 Forward (F)
+        p_edm_d = {"team": "EDM", "ev_line": "D1", "pp_unit": "PP1", "pos": "D"}
+        p_edm_f3 = {"team": "EDM", "ev_line": "L2", "pp_unit": "PP1", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_d, p_edm_f3), 0.35)
+
+        # Same team, both PP1 forwards on different EV lines
+        p_edm_f4 = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"}
+        p_edm_f5 = {"team": "EDM", "ev_line": "L2", "pp_unit": "PP1", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_f4, p_edm_f5), 0.30)
+
+        # Same team, L1 forwards (no PP)
+        p_edm_f6 = {"team": "EDM", "ev_line": "L1", "pp_unit": "NA", "pos": "F"}
+        p_edm_f7 = {"team": "EDM", "ev_line": "L1", "pp_unit": "NA", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_f6, p_edm_f7), 0.24)
+
+        # Same team, L2 forwards
+        p_edm_f8 = {"team": "EDM", "ev_line": "L2", "pp_unit": "NA", "pos": "F"}
+        p_edm_f9 = {"team": "EDM", "ev_line": "L2", "pp_unit": "NA", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_f8, p_edm_f9), 0.20)
+
+        # Same team, PP2 forwards
+        p_edm_f10 = {"team": "EDM", "ev_line": "L3", "pp_unit": "PP2", "pos": "F"}
+        p_edm_f11 = {"team": "EDM", "ev_line": "L4", "pp_unit": "PP2", "pos": "F"}
+        self.assertEqual(compute_pair_correlation(p_edm_f10, p_edm_f11), 0.18)
+
+        # Same team generic players
+        p_edm_gen1 = {"team": "EDM", "ev_line": "L3", "pp_unit": "NA", "pos": "F"}
+        p_edm_gen2 = {"team": "EDM", "ev_line": "D3", "pp_unit": "NA", "pos": "D"}
+        self.assertEqual(compute_pair_correlation(p_edm_gen1, p_edm_gen2), 0.08)
+
+        # Goalie factor modulation
+        p_g1 = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F", "goalie_factor": 1.25}
+        p_g2 = {"team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F", "goalie_factor": 1.25}
+        self.assertGreater(compute_pair_correlation(p_g1, p_g2), 0.40)
+
+    def test_build_lineup_correlation_matrix_properties(self):
+        lineup = [
+            {"name": "McDavid", "team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "Draisaitl", "team": "EDM", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "MacKinnon", "team": "COL", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+            {"name": "Makar", "team": "COL", "ev_line": "D1", "pp_unit": "PP1", "pos": "D"},
+            {"name": "Kucherov", "team": "TBL", "ev_line": "L1", "pp_unit": "PP1", "pos": "F"},
+        ]
+        R = build_lineup_correlation_matrix(lineup)
+        self.assertEqual(R.shape, (5, 5))
+        self.assertTrue(np.allclose(R, R.T))
+        self.assertTrue(np.allclose(np.diag(R), np.ones(5)))
+        self.assertEqual(R[0, 2], 0.0)
+        self.assertEqual(R[1, 4], 0.0)
+        self.assertEqual(R[0, 1], 0.40)
+        self.assertEqual(R[2, 3], 0.35)
+
+    def test_simulate_lineup_distribution_speed_and_quantiles(self):
+        lineup = [
+            {"name": "P1", "team": "EDM", "pos": "F", "xRRS": 8.0, "slot_boost": 2.0, "total_boost": 2.0, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P2", "team": "EDM", "pos": "F", "xRRS": 7.0, "slot_boost": 1.8, "total_boost": 1.8, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P3", "team": "COL", "pos": "F", "xRRS": 6.5, "slot_boost": 1.6, "total_boost": 1.6, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P4", "team": "COL", "pos": "D", "xRRS": 6.0, "slot_boost": 1.4, "total_boost": 1.4, "booster": 0.0, "ev_line": "D1", "pp_unit": "PP1"},
+            {"name": "P5", "team": "TBL", "pos": "F", "xRRS": 5.5, "slot_boost": 1.2, "total_boost": 1.2, "booster": 0.0, "ev_line": "L1", "pp_unit": "PP1"},
+        ]
+        t0 = time.perf_counter()
+        sim = simulate_lineup_distribution(lineup, n_sims=10000, seed=42)
+        elapsed = time.perf_counter() - t0
+
+        self.assertLess(elapsed, 0.50)
+        self.assertIn("mean", sim)
+        self.assertIn("std", sim)
+        self.assertIn("floor_25", sim)
+        self.assertIn("median_50", sim)
+        self.assertIn("ceiling_90", sim)
+        self.assertIn("ceiling_95", sim)
+        self.assertLess(sim["floor_25"], sim["median_50"])
+        self.assertLess(sim["median_50"], sim["ceiling_90"])
+        self.assertLess(sim["ceiling_90"], sim["ceiling_95"])
+        self.assertGreater(sim["std"], 0.0)
+
+    def test_simulate_lineup_distribution_stacking_covariance_effect(self):
+        lineup_uncorr = [
+            {"name": "P1", "team": "EDM", "pos": "F", "xRRS": 8.0, "total_boost": 2.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P2", "team": "TOR", "pos": "F", "xRRS": 7.0, "total_boost": 1.8, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P3", "team": "COL", "pos": "F", "xRRS": 6.5, "total_boost": 1.6, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P4", "team": "BOS", "pos": "F", "xRRS": 6.0, "total_boost": 1.4, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P5", "team": "TBL", "pos": "F", "xRRS": 5.5, "total_boost": 1.2, "ev_line": "L1", "pp_unit": "PP1"},
+        ]
+
+        lineup_stacked = [
+            {"name": "P1", "team": "EDM", "pos": "F", "xRRS": 8.0, "total_boost": 2.0, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P2", "team": "EDM", "pos": "F", "xRRS": 7.0, "total_boost": 1.8, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P3", "team": "COL", "pos": "F", "xRRS": 6.5, "total_boost": 1.6, "ev_line": "L1", "pp_unit": "PP1"},
+            {"name": "P4", "team": "COL", "pos": "D", "xRRS": 6.0, "total_boost": 1.4, "ev_line": "D1", "pp_unit": "PP1"},
+            {"name": "P5", "team": "TBL", "pos": "F", "xRRS": 5.5, "total_boost": 1.2, "ev_line": "L1", "pp_unit": "PP1"},
+        ]
+
+        res_uncorr = simulate_lineup_distribution(lineup_uncorr, n_sims=10000, seed=123)
+        res_stacked = simulate_lineup_distribution(lineup_stacked, n_sims=10000, seed=123)
+
+        self.assertAlmostEqual(res_uncorr["mean"], res_stacked["mean"], delta=1.5)
+        self.assertGreater(res_stacked["std"], res_uncorr["std"])
+        self.assertGreater(res_stacked["ceiling_90"], res_uncorr["ceiling_90"])
+        self.assertGreater(res_stacked["ceiling_95"], res_uncorr["ceiling_95"])
+        self.assertLess(res_stacked["floor_25"], res_uncorr["floor_25"])
+
+    def test_print_lineup_table_includes_monte_carlo_quantiles(self):
+        lineup = [
+            {"slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "name": "Connor McDavid", "team": "EDM", "opp": "vsCGY", "opp_goalie": "D. Wolf", "xRRS": 9.5, "booster": 0.0, "score": 19.0, "line_tag": "L1/PP1", "stack": "[EDM PP1]"},
+            {"slot": 2, "slot_boost": 1.8, "total_boost": 1.8, "name": "Leon Draisaitl", "team": "EDM", "opp": "vsCGY", "opp_goalie": "D. Wolf", "xRRS": 8.5, "booster": 0.0, "score": 15.3, "line_tag": "L1/PP1", "stack": "[EDM PP1]"},
+            {"slot": 3, "slot_boost": 1.6, "total_boost": 1.6, "name": "Cale Makar", "team": "COL", "opp": "@PHI", "opp_goalie": "S. Ersson", "xRRS": 8.0, "booster": 0.0, "score": 12.8, "line_tag": "D1/PP1", "stack": ""},
+            {"slot": 4, "slot_boost": 1.4, "total_boost": 1.4, "name": "Kirill Kaprizov", "team": "MIN", "opp": "vsCBJ", "opp_goalie": "E. Merzlikins", "xRRS": 7.5, "booster": 0.0, "score": 10.5, "line_tag": "L1/PP1", "stack": ""},
+            {"slot": 5, "slot_boost": 1.2, "total_boost": 1.2, "name": "Sidney Crosby", "team": "PIT", "opp": "@UTA", "opp_goalie": "C. Ingram", "xRRS": 7.0, "booster": 0.0, "score": 8.4, "line_tag": "L1/PP1", "stack": ""}
+        ]
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            print_lineup_table("2026-10-20", lineup, 66.0, title="Tournament Stack", synergy_score=72.5)
+        out = buf.getvalue()
+
+        self.assertIn("Monte-Carlo Simulation", out)
+        self.assertIn("Expected Score (Mean):", out)
+        self.assertIn("Floor (25th percentile):", out)
+        self.assertIn("Ceiling (90th percentile):", out)
+        self.assertIn("Ceiling (95th percentile):", out)
+
+    def test_solve_optimal_lineup_runtime_complexity(self):
+        large_cands = [
+            {"id": i, "name": f"Skater_{i}", "team": f"T{i % 10}", "pos": "F", "xRRS": 2.0 + (i % 8) * 0.8, "booster": 0.1 * (i % 5)}
+            for i in range(100)
+        ]
+        t0 = time.perf_counter()
+        lineup, score = optimizer.solve_optimal_lineup(large_cands)
+        elapsed = time.perf_counter() - t0
+        self.assertEqual(len(lineup), 5)
+        self.assertGreater(score, 0.0)
+        self.assertLess(elapsed, 0.05)
 
 
 if __name__ == "__main__":

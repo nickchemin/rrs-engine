@@ -33,7 +33,10 @@ from optimizer import (
     compute_pair_synergy,
     solve_optimal_lineup,
     solve_stacked_lineup,
-    print_lineup_table
+    print_lineup_table,
+    compute_pair_correlation,
+    build_lineup_correlation_matrix,
+    simulate_lineup_distribution
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
