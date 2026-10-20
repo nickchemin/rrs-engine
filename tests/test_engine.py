@@ -1702,17 +1702,34 @@ class TestReviewFixes(unittest.TestCase):
 
     # 2. NHLClient.session thread safety
     def test_nhl_client_session_thread_safety(self):
-        import concurrent.futures
+        import threading
 
-        def get_sess():
-            return id(self.client.session)
+        # Verify threading.local guarantees each concurrent thread its own Session instance
+        barrier = threading.Barrier(4)
+        sessions = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(get_sess) for _ in range(8)]
-            results = [f.result() for f in futures]
+        def worker():
+            s = self.client.session
+            sessions.append(s)
+            barrier.wait(timeout=5)
 
-        # Each thread gets its own Session instance
-        self.assertGreater(len(set(results)), 1)
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        # 4 concurrent threads must have 4 distinct session objects
+        self.assertEqual(len(sessions), 4)
+        self.assertEqual(len(set(sessions)), 4)
+
+        # Main thread gets its own distinct session
+        self.assertNotIn(self.client.session, sessions)
+
+        # Custom session setter overrides thread-local for mockability in tests
+        mock_custom = MagicMock()
+        self.client.session = mock_custom
+        self.assertIs(self.client.session, mock_custom)
 
     # 3. Cache TTL default 3.0 hours for schedule and injuries
     def test_cache_ttl_max_age(self):
@@ -2100,12 +2117,12 @@ class TestReviewFixes(unittest.TestCase):
     # 19. Mutually exclusive group includes --record
     def test_record_mutually_exclusive_with_sync_and_history(self):
         test_args = ["main.py", "--record", "today", "--sync"]
-        with patch("sys.argv", test_args):
+        with patch("sys.argv", test_args), patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):
                 main_entry()
 
         test_args2 = ["main.py", "--record", "today", "--history"]
-        with patch("sys.argv", test_args2):
+        with patch("sys.argv", test_args2), patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):
                 main_entry()
 
