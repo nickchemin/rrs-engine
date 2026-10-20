@@ -22,9 +22,14 @@ classifiers = [
     "Topic :: Games/Entertainment",
 ]
 dependencies = [
-    "numpy>=1.24.0,<2.3.0",
+    "numpy>=1.24.0",
     "requests>=2.28.0,<3.0.0",
     "tzdata>=2023.3; sys_platform == 'win32'",
+    "scikit-learn>=1.2.0",
+    "scipy>=1.10.0",
+    "rapidfuzz>=3.0.0",
+    "pillow>=8.0.0",
+    "pytesseract>=0.3.10",
 ]
 
 [project.scripts]

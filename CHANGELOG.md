@@ -47,7 +47,17 @@ All notable changes to the RRS Engine project are documented in this file.
   - Engineered an automatic fallback mechanism that activates when Daily Faceoff experiences server downtime (HTTP 5xx/404), cloudflare challenges, or layout mutations.
   - Queries official NHL stats API time-on-ice endpoints (`skater/timeonice`) and recent 3-game logs to dynamically reconstruct forward lines (`L1` to `L4`), defensive pairings (`D1` to `D3`), and power play units (`PP1`/`PP2`) ranked by EV TOI and PP TOI per game.
   - Guarantees seamless continuation of lineup generation and projection modeling without missing line assignments.
-- **118 Offline Unit Tests**: Test suite expanded from 115 to 118 tests covering exponential backoff retry sequences, retry exhaustion exceptions, and NHL API TOI-based fallback reconstruction.
+- **Draft Screenshot OCR & Booster Auto-Fill Engine (`image_parser.py`, `--parse-images`)**:
+  - Implemented modular OCR framework (`OCRBackend`, `TesseractOCR`, `VisionAPIOCR`, `MockOCR`) supporting local Tesseract-OCR discovery, cloud Vision API endpoints, and mock test fixtures.
+  - Multi-layout text parsing engine (`extract_booster_candidates_from_text`) capable of extracting boosters from multi-line draft card widgets, single-line tables, and labeled entries (`+0.4`, `1.2x`, `+20%`, `0.8`, `3.0`).
+  - High-performance fuzzy matching via `RapidFuzz` (with `difflib` fallback) matching noisy OCR candidate strings against active game-day rosters with team compatibility verification and position validation.
+  - Robust namesake disambiguation for duplicate players (e.g. `Elias Pettersson (D)` vs `Elias Pettersson (C)`).
+  - Terminal reporting summary table displaying matched player names, teams, positions, detected multipliers, confidence ratings, and source image filenames.
+  - Automatic atomic writeback into `boosters.txt` preserving team section partitions and comments, with immediate synchronization to the SQLite database.
+  - Integrated CLI argument `--parse-images <path_to_folder>` into `main.py` mutually exclusive with `--sync`, `--history`, and `--record`.
+- **Dependencies & Project Packaging**:
+  - Declared `scikit-learn`, `scipy`, `rapidfuzz`, `pillow`, and `pytesseract` in `requirements.txt` and `pyproject.toml`.
+- **127 Offline Unit Tests**: Test suite expanded from 118 to 127 tests (+9 tests in `TestPhase4ImageParserAndOCR`) covering booster token parsing, single-line and card OCR extraction, fuzzy matching tolerance, namesake disambiguation, directory scanning with mock OCR, database synchronization, and CLI mutual exclusivity.
 
 ## [2.4.1] - 2026-10-19
 

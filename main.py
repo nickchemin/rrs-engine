@@ -1248,6 +1248,7 @@ def main():
     group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     group.add_argument("--record", nargs="?", const="today", default=None, help="Record actual Real Sports mobile app ratings and payouts (YYYY-MM-DD or YYYY-MM-DD:s1,s2,s3,s4,s5)")
+    group.add_argument("--parse-images", type=str, default=None, metavar="FOLDER", help="Parse Real Sports draft screenshots from folder to populate boosters.txt")
     parser.add_argument("--date", type=parse_iso_date_arg, default="", help="Target date (YYYY-MM-DD), default is current day")
     parser.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
     parser.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
@@ -1268,6 +1269,8 @@ def main():
 
     if args.sync:
         mode_label = "Sync Roster & Boosters"
+    elif args.parse_images is not None:
+        mode_label = "Parse Draft Screenshots"
     elif args.train:
         mode_label = "Model Validation & Backtest"
     elif args.calibrate:
@@ -1289,6 +1292,11 @@ def main():
 
     # Settle any past games in history
     settle_past_lineups(client, db)
+
+    if args.parse_images is not None:
+        from image_parser import handle_parse_images
+        handle_parse_images(args.parse_images, client, db, target_date=args.date)
+        return
 
     if args.record is not None:
         handle_record_app_scores(db, args.record)

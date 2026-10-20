@@ -1,6 +1,7 @@
 import io
 import os
 import sys
+import shutil
 import unittest
 import tempfile
 import argparse
@@ -2609,6 +2610,222 @@ class TestPhase3ScrapingAndFallback(unittest.TestCase):
 
         saved = self.db.get_team_lines("EDM")
         self.assertEqual(saved.get(("connor mcdavid", "F"))["ev_line"], "L1")
+
+
+class TestPhase4ImageParserAndOCR(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test_phase4.db")
+        self.boosters_path = os.path.join(self.tmp_dir, "test_boosters.txt")
+        self.db = Database(self.db_path)
+        self.client = NHLClient(self.db)
+
+    def tearDown(self):
+        try:
+            shutil.rmtree(self.tmp_dir)
+        except OSError:
+            pass
+
+    def test_parse_booster_multiplier_tokens(self):
+        from image_parser import parse_booster_multiplier_token
+        self.assertEqual(parse_booster_multiplier_token("+0.4"), 0.4)
+        self.assertEqual(parse_booster_multiplier_token("1.2x"), 1.2)
+        self.assertEqual(parse_booster_multiplier_token("+20%"), 0.2)
+        self.assertEqual(parse_booster_multiplier_token("0.8"), 0.8)
+        self.assertEqual(parse_booster_multiplier_token("3.0"), 3.0)
+        self.assertEqual(parse_booster_multiplier_token("+0"), 0.0)
+        self.assertEqual(parse_booster_multiplier_token("15%"), 0.15)
+        self.assertIsNone(parse_booster_multiplier_token("invalid_token"))
+
+    def test_extract_booster_candidates_single_line(self):
+        from image_parser import extract_booster_candidates_from_text
+        text = """
+        Leon Draisaitl +0.4
+        Matt Boldy = 0.8
+        Evan Bouchard (D) +1.1
+        Alexis Lafreniere: +20%
+        """
+        candidates = extract_booster_candidates_from_text(text)
+        self.assertEqual(len(candidates), 4)
+
+        names = {c["raw_name"]: c["booster_val"] for c in candidates}
+        self.assertEqual(names.get("Leon Draisaitl"), 0.4)
+        self.assertEqual(names.get("Matt Boldy"), 0.8)
+        self.assertEqual(names.get("Evan Bouchard"), 1.1)
+        self.assertEqual(names.get("Alexis Lafreniere"), 0.2)
+
+        # Check Evan Bouchard has pos D
+        bouchard = next(c for c in candidates if c["raw_name"] == "Evan Bouchard")
+        self.assertEqual(bouchard.get("pos"), "D")
+
+    def test_extract_booster_candidates_multiline_card(self):
+        from image_parser import extract_booster_candidates_from_text
+        text = """
+        REAL SPORTS FANTASY DRAFT
+        Connor McDavid
+        EDM • C
+        +0.4
+        
+        Cale Makar
+        COL - D
+        +1.4
+        
+        Nathan MacKinnon
+        COL - C
+        +0.0
+        """
+        candidates = extract_booster_candidates_from_text(text)
+        self.assertGreaterEqual(len(candidates), 3)
+
+        cand_map = {c["raw_name"]: c for c in candidates}
+        self.assertIn("Connor McDavid", cand_map)
+        self.assertEqual(cand_map["Connor McDavid"]["booster_val"], 0.4)
+        self.assertEqual(cand_map["Connor McDavid"]["team"], "EDM")
+        self.assertEqual(cand_map["Connor McDavid"]["pos"], "C")
+
+        self.assertIn("Cale Makar", cand_map)
+        self.assertEqual(cand_map["Cale Makar"]["booster_val"], 1.4)
+        self.assertEqual(cand_map["Cale Makar"]["team"], "COL")
+        self.assertEqual(cand_map["Cale Makar"]["pos"], "D")
+
+    def test_match_player_candidate_fuzzy_accuracy(self):
+        from image_parser import match_player_candidate
+        slate = [
+            {"id": 101, "name": "Leon Draisaitl", "team": "EDM", "pos": "C", "is_duplicate": False},
+            {"id": 102, "name": "Connor McDavid", "team": "EDM", "pos": "C", "is_duplicate": False},
+            {"id": 103, "name": "Alexis Lafrenière", "team": "NYR", "pos": "L", "is_duplicate": False},
+        ]
+        # Slight OCR typo: 'Leon Draisaiti'
+        cand_typo = {"raw_name": "Leon Draisaiti", "team": "EDM", "pos": "C", "booster_val": 0.4}
+        res = match_player_candidate(cand_typo, slate)
+        self.assertIsNotNone(res)
+        matched_p, canon_key, conf = res
+        self.assertEqual(matched_p["name"], "Leon Draisaitl")
+        self.assertEqual(canon_key, "leon draisaitl")
+        self.assertGreater(conf, 85.0)
+
+        # Accented name matching
+        cand_acc = {"raw_name": "Alexis Lafreniere", "team": "NYR", "pos": "F", "booster_val": 0.2}
+        res_acc = match_player_candidate(cand_acc, slate)
+        self.assertIsNotNone(res_acc)
+        self.assertEqual(res_acc[0]["name"], "Alexis Lafrenière")
+
+    def test_match_player_candidate_namesake_disambiguation(self):
+        from image_parser import match_player_candidate
+        slate = [
+            {"id": 201, "name": "Elias Pettersson", "team": "VAN", "pos": "C", "is_duplicate": True},
+            {"id": 202, "name": "Elias Pettersson", "team": "VAN", "pos": "D", "is_duplicate": True},
+        ]
+        # Case 1: Defenseman
+        cand_d = {"raw_name": "Elias Pettersson", "team": "VAN", "pos": "D", "booster_val": 0.0}
+        res_d = match_player_candidate(cand_d, slate)
+        self.assertIsNotNone(res_d)
+        _, canon_key_d, _ = res_d
+        self.assertEqual(canon_key_d, "elias pettersson (d)")
+
+        # Case 2: Center
+        cand_c = {"raw_name": "Elias Pettersson", "team": "VAN", "pos": "C", "booster_val": 1.4}
+        res_c = match_player_candidate(cand_c, slate)
+        self.assertIsNotNone(res_c)
+        _, canon_key_c, _ = res_c
+        self.assertEqual(canon_key_c, "elias pettersson (c)")
+
+    def test_parse_images_directory_with_mock_ocr(self):
+        from image_parser import MockOCR, parse_images_directory
+        # Create dummy image files
+        img1 = os.path.join(self.tmp_dir, "draft_page1.png")
+        img2 = os.path.join(self.tmp_dir, "draft_page2.png")
+        with open(img1, "wb") as f:
+            f.write(b"PNG_FAKE_BYTES_1")
+        with open(img2, "wb") as f:
+            f.write(b"PNG_FAKE_BYTES_2")
+
+        ocr_map = {
+            "draft_page1.png": "Connor McDavid\nEDM - C\n+0.4\nLeon Draisaitl\nEDM - C\n+0.6\n",
+            "draft_page2.png": "Evan Bouchard\nEDM - D\n+1.1\nMatt Boldy = 0.8\n"
+        }
+        mock_backend = MockOCR(text_mapping=ocr_map)
+
+        slate = [
+            {"id": 1, "name": "Connor McDavid", "team": "EDM", "pos": "C", "is_duplicate": False},
+            {"id": 2, "name": "Leon Draisaitl", "team": "EDM", "pos": "C", "is_duplicate": False},
+            {"id": 3, "name": "Evan Bouchard", "team": "EDM", "pos": "D", "is_duplicate": False},
+            {"id": 4, "name": "Matt Boldy", "team": "MIN", "pos": "L", "is_duplicate": False},
+        ]
+
+        boosters, detailed = parse_images_directory(self.tmp_dir, slate, ocr_backend=mock_backend)
+        self.assertEqual(len(boosters), 4)
+        self.assertEqual(boosters.get("connor mcdavid"), 0.4)
+        self.assertEqual(boosters.get("leon draisaitl"), 0.6)
+        self.assertEqual(boosters.get("evan bouchard"), 1.1)
+        self.assertEqual(boosters.get("matt boldy"), 0.8)
+        self.assertEqual(len(detailed), 4)
+
+    def test_handle_parse_images_orchestrator(self):
+        from image_parser import MockOCR, handle_parse_images
+        img = os.path.join(self.tmp_dir, "screen.png")
+        with open(img, "wb") as f:
+            f.write(b"DUMMY_IMAGE")
+
+        mock_ocr = MockOCR(default_text="Nathan MacKinnon\nCOL - C\n+0.4\nCale Makar\nCOL - D\n+1.2\n")
+
+        # Mock schedule with games
+        fake_schedule = [
+            {
+                "date": "2026-10-21",
+                "games": [{"homeTeam": "COL", "awayTeam": "EDM"}]
+            }
+        ]
+
+        with patch.object(self.client, "get_upcoming_schedule", return_value=fake_schedule), \
+             patch.object(self.client, "get_injuries", return_value=[]), \
+             patch.object(self.client, "get_starting_goalies", return_value=[]), \
+             patch.object(self.client, "prefetch_teams_lines", return_value={}), \
+             patch("main.collect_slate_skaters", return_value=(
+                 [
+                     {"name": "Nathan MacKinnon", "team": "COL", "pos": "C", "id": 11, "is_duplicate": False, "xRRS": 12.0, "booster": 0.0},
+                     {"name": "Cale Makar", "team": "COL", "pos": "D", "id": 12, "is_duplicate": False, "xRRS": 11.0, "booster": 0.0}
+                 ],
+                 [], [], 0, 0, set()
+             )):
+            res = handle_parse_images(
+                self.tmp_dir,
+                self.client,
+                self.db,
+                target_date="2026-10-21",
+                boosters_path=self.boosters_path,
+                ocr_backend=mock_ocr
+            )
+
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res.get("nathan mackinnon"), 0.4)
+        self.assertEqual(res.get("cale makar"), 1.2)
+
+        # Check file was written
+        self.assertTrue(os.path.exists(self.boosters_path))
+        with open(self.boosters_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Nathan MacKinnon", content)
+        self.assertIn("Cale Makar", content)
+
+        # Check DB was synchronized
+        db_boosters = self.db.get_all_boosters()
+        self.assertEqual(db_boosters.get("nathan mackinnon"), 0.4)
+        self.assertEqual(db_boosters.get("cale makar"), 1.2)
+
+    def test_cli_parse_images_mutually_exclusive_with_sync(self):
+        from main import main as main_entry
+        test_args = ["main.py", "--parse-images", "some_folder", "--sync"]
+        with patch("sys.argv", test_args), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main_entry()
+
+    def test_cli_parse_images_mutually_exclusive_with_record(self):
+        from main import main as main_entry
+        test_args = ["main.py", "--parse-images", "some_folder", "--record", "today"]
+        with patch("sys.argv", test_args), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main_entry()
 
 
 if __name__ == "__main__":
