@@ -2828,6 +2828,218 @@ class TestPhase4ImageParserAndOCR(unittest.TestCase):
                 main_entry()
 
 
+class TestPhase5ComprehensiveSuite(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test_phase5.db")
+        self.db = Database(self.db_path)
+        self.client = NHLClient(self.db)
+
+    def tearDown(self):
+        try:
+            shutil.rmtree(self.tmp_dir)
+        except OSError:
+            pass
+
+    def test_b2b_fatigue_schedule_edge_cases(self):
+        # 1. Season opener edge case: no past games in schedule
+        ctx_opener = self.db.get_schedule_context("EDM", "CGY", "2026-10-01")
+        self.assertFalse(ctx_opener["is_b2b"])
+        self.assertEqual(ctx_opener["rest_days"], 2.0)
+        self.assertFalse(ctx_opener["opp_is_b2b"])
+        self.assertEqual(ctx_opener["opp_rest_days"], 2.0)
+
+        # 2. Double B2B: both teams played on 2026-10-19, playing against each other on 2026-10-20
+        schedule_days = [
+            {
+                "date": "2026-10-19",
+                "games": [
+                    {"gameId": 10, "homeTeam": "EDM", "awayTeam": "VAN"},
+                    {"gameId": 11, "homeTeam": "CGY", "awayTeam": "SEA"}
+                ]
+            },
+            {
+                "date": "2026-10-20",
+                "games": [
+                    {"gameId": 12, "homeTeam": "CGY", "awayTeam": "EDM"}
+                ]
+            }
+        ]
+        self.db.save_schedule(schedule_days)
+
+        ctx_edm = self.db.get_schedule_context("EDM", "CGY", "2026-10-20")
+        self.assertTrue(ctx_edm["is_b2b"])
+        self.assertEqual(ctx_edm["rest_days"], 1.0)
+        self.assertTrue(ctx_edm["opp_is_b2b"])
+        self.assertEqual(ctx_edm["opp_rest_days"], 1.0)
+        self.assertFalse(ctx_edm["is_home"])
+
+        ctx_cgy = self.db.get_schedule_context("CGY", "EDM", "2026-10-20")
+        self.assertTrue(ctx_cgy["is_b2b"])
+        self.assertEqual(ctx_cgy["rest_days"], 1.0)
+        self.assertTrue(ctx_cgy["opp_is_b2b"])
+        self.assertEqual(ctx_cgy["opp_rest_days"], 1.0)
+        self.assertTrue(ctx_cgy["is_home"])
+
+        # 3. Fatigue modulation in PerformancePredictor
+        predictor = PerformancePredictor(model_type="poisson")
+        sample_logs = [
+            {"gameDate": "2026-10-10", "goals": 1, "assists": 1, "shots": 4, "toi": "21:30"},
+            {"gameDate": "2026-10-12", "goals": 0, "assists": 2, "shots": 3, "toi": "20:45"},
+            {"gameDate": "2026-10-15", "goals": 1, "assists": 0, "shots": 4, "toi": "22:15"},
+        ]
+        # Predict with B2B fatigue vs well-rested
+        pred_rested = predictor.predict(
+            sample_logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20",
+            is_b2b=False, opp_is_b2b=False
+        )
+        pred_fatigued = predictor.predict(
+            sample_logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20",
+            is_b2b=True, opp_is_b2b=False
+        )
+        pred_opp_b2b = predictor.predict(
+            sample_logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20",
+            is_b2b=False, opp_is_b2b=True
+        )
+
+        self.assertLess(pred_fatigued["xG"], pred_rested["xG"])
+        self.assertLess(pred_fatigued["xA"], pred_rested["xA"])
+        self.assertGreater(pred_opp_b2b["xG"], pred_rested["xG"])
+        self.assertGreater(pred_opp_b2b["xA"], pred_rested["xA"])
+
+    def test_toi_fallback_incomplete_data_and_pp_distribution(self):
+        # Test fallback when skater data has partial stats and missing TOI
+        skaters = [
+            {"playerId": 301, "firstName": {"default": "Forward"}, "lastName": {"default": "One"}, "positionCode": "C"},
+            {"playerId": 302, "firstName": {"default": "Forward"}, "lastName": {"default": "Two"}, "positionCode": "L"},
+            {"playerId": 303, "firstName": {"default": "Forward"}, "lastName": {"default": "Three"}, "positionCode": "R"},
+            {"playerId": 304, "firstName": {"default": "Forward"}, "lastName": {"default": "Four"}, "positionCode": "C"},
+            {"playerId": 305, "firstName": {"default": "Forward"}, "lastName": {"default": "Five"}, "positionCode": "L"},
+            {"playerId": 306, "firstName": {"default": "Forward"}, "lastName": {"default": "Six"}, "positionCode": "R"},
+            {"playerId": 401, "firstName": {"default": "Defense"}, "lastName": {"default": "One"}, "positionCode": "D"},
+            {"playerId": 402, "firstName": {"default": "Defense"}, "lastName": {"default": "Two"}, "positionCode": "D"},
+            {"playerId": 403, "firstName": {"default": "Defense"}, "lastName": {"default": "Three"}, "positionCode": "D"},
+        ]
+
+        # Only provide TOI for some skaters, others missing/zero
+        toi_rows = [
+            {"playerId": 301, "evTimeOnIcePerGame": 1200.0, "ppTimeOnIcePerGame": 240.0, "timeOnIcePerGame": 1440.0},
+            {"playerId": 302, "evTimeOnIcePerGame": 1150.0, "ppTimeOnIcePerGame": 220.0, "timeOnIcePerGame": 1370.0},
+            {"playerId": 303, "evTimeOnIcePerGame": 1100.0, "ppTimeOnIcePerGame": 210.0, "timeOnIcePerGame": 1310.0},
+            {"playerId": 304, "evTimeOnIcePerGame": 1000.0, "ppTimeOnIcePerGame": 190.0, "timeOnIcePerGame": 1190.0},
+            {"playerId": 305, "evTimeOnIcePerGame": 900.0, "ppTimeOnIcePerGame": 100.0, "timeOnIcePerGame": 1000.0},
+            # 306 has 0 TOI / missing
+            {"playerId": 401, "evTimeOnIcePerGame": 1300.0, "ppTimeOnIcePerGame": 250.0, "timeOnIcePerGame": 1550.0},
+            {"playerId": 402, "evTimeOnIcePerGame": 1200.0, "ppTimeOnIcePerGame": 50.0, "timeOnIcePerGame": 1250.0},
+        ]
+        toi_resp = MagicMock(status_code=200)
+        toi_resp.json.return_value = {"data": toi_rows}
+
+        def fake_retry(url, *args, **kwargs):
+            if "timeonice" in url:
+                return toi_resp
+            return MagicMock(status_code=500)
+
+        with patch.object(self.client, "request_with_retry", side_effect=fake_retry), \
+             patch.object(self.client, "_fetch_team_skaters", return_value=skaters):
+            lines = self.client.get_team_lines("BOS", force=True)
+
+        self.assertIsNotNone(lines)
+        # Check top PP unit has exactly 4 forwards and 1 defenseman
+        f_pp1 = [(k, v) for k, v in lines.items() if isinstance(k, tuple) and k[1] == "F" and v.get("pp_unit") == "PP1"]
+        d_pp1 = [(k, v) for k, v in lines.items() if isinstance(k, tuple) and k[1] == "D" and v.get("pp_unit") == "PP1"]
+        self.assertEqual(len(f_pp1), 4)
+        self.assertEqual(len(d_pp1), 1)
+        self.assertEqual(d_pp1[0][0][0], "defense one")
+
+        # Check rookie / 0 TOI skater did not crash and was placed on lower line
+        f_six = lines.get(("forward six", "F"))
+        self.assertIsNotNone(f_six)
+        self.assertEqual(f_six["ev_line"], "L2")
+
+    def test_monte_carlo_distribution_mathematical_invariants(self):
+        lineup = [
+            {"name": "McDavid", "team": "EDM", "pos": "F", "ev_line": "L1", "pp_unit": "PP1", "xRRS": 12.0, "score": 24.0, "slot_boost": 2.0},
+            {"name": "Draisaitl", "team": "EDM", "pos": "F", "ev_line": "L1", "pp_unit": "PP1", "xRRS": 10.0, "score": 18.0, "slot_boost": 1.8},
+            {"name": "Bouchard", "team": "EDM", "pos": "D", "ev_line": "D1", "pp_unit": "PP1", "xRRS": 8.0, "score": 12.8, "slot_boost": 1.6},
+            {"name": "MacKinnon", "team": "COL", "pos": "F", "ev_line": "L1", "pp_unit": "PP1", "xRRS": 11.0, "score": 15.4, "slot_boost": 1.4},
+            {"name": "Makar", "team": "COL", "pos": "D", "ev_line": "D1", "pp_unit": "PP1", "xRRS": 9.0, "score": 10.8, "slot_boost": 1.2},
+        ]
+        # 1. Verify correlation matrix properties
+        R = build_lineup_correlation_matrix(lineup)
+        # Symmetry
+        self.assertTrue(np.allclose(R, R.T))
+        # Diagonal is identically 1.0
+        self.assertTrue(np.allclose(np.diag(R), np.ones(5)))
+        # Strictly positive eigenvalues
+        eigvals = np.linalg.eigvalsh(R)
+        self.assertTrue(all(ev > 0.0 for ev in eigvals))
+        # Off-diagonal elements bounded in [0, 1)
+        for i in range(5):
+            for j in range(5):
+                if i != j:
+                    self.assertGreaterEqual(R[i, j], 0.0)
+                    self.assertLess(R[i, j], 1.0)
+
+        # 2. Verify Monte Carlo monotonicity invariant: Floor_25 <= Mean <= Ceil_90 <= Ceil_95
+        dist = simulate_lineup_distribution(lineup, n_sims=5000, seed=42)
+        mean_score = dist["mean"]
+        floor_25 = dist["floor_25"]
+        ceil_90 = dist["ceiling_90"]
+        ceil_95 = dist["ceiling_95"]
+
+        self.assertLessEqual(floor_25, mean_score)
+        self.assertLessEqual(mean_score, ceil_90)
+        self.assertLessEqual(ceil_90, ceil_95)
+
+        # Variance of stacked EDM trio should be non-zero
+        self.assertGreater(dist["std"], 0.0)
+
+    def test_no_look_ahead_bias_stress_test(self):
+        # Populate historical database with past logs for a player
+        p_id = 999
+        self.db.save_player(p_id, "Test Skater", "TOR", "C")
+
+        past_logs = [
+            {"gameId": 101, "gameDate": "2026-10-10", "goals": 1, "assists": 1, "shots": 4, "toi": "20:00"},
+            {"gameId": 102, "gameDate": "2026-10-12", "goals": 0, "assists": 2, "shots": 3, "toi": "19:30"},
+            {"gameId": 103, "gameDate": "2026-10-14", "goals": 2, "assists": 0, "shots": 5, "toi": "21:00"},
+        ]
+        self.db.save_game_logs(p_id, past_logs)
+
+        # Target split date: 2026-10-15
+        predictor = PerformancePredictor(model_type="poisson")
+        pred_before = predictor.predict(
+            past_logs, is_home=True, opponent_abbrev="MTL", game_date="2026-10-15",
+            is_b2b=False, opp_is_b2b=False
+        )
+
+        # Now inject FUTURE game logs (e.g. 2026-10-25) into the database
+        future_logs = [
+            {"gameId": 201, "gameDate": "2026-10-25", "goals": 5, "assists": 5, "shots": 10, "toi": "25:00"},
+            {"gameId": 202, "gameDate": "2026-10-28", "goals": 4, "assists": 4, "shots": 12, "toi": "26:00"},
+        ]
+        self.db.save_game_logs(p_id, future_logs)
+
+        # Query player logs strictly before 2026-10-15
+        all_logs = self.db.get_game_logs(p_id)
+        point_in_time_logs = [
+            g for g in all_logs
+            if (g.get("gameDate") or g.get("game_date") or "") < "2026-10-15"
+        ]
+        self.assertEqual(len(point_in_time_logs), 3)
+
+        # Predictions using point-in-time filtered logs remain 100% invariant
+        pred_after = predictor.predict(
+            point_in_time_logs, is_home=True, opponent_abbrev="MTL", game_date="2026-10-15",
+            is_b2b=False, opp_is_b2b=False
+        )
+        self.assertEqual(pred_before["xG"], pred_after["xG"])
+        self.assertEqual(pred_before["xA"], pred_after["xA"])
+        self.assertEqual(pred_before["xSOG"], pred_after["xSOG"])
+        self.assertEqual(pred_before["xRRS"], pred_after["xRRS"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

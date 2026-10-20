@@ -1,18 +1,40 @@
 # RRS Engine
 
-Quantitative draft optimizer and sports analytics terminal for NHL contests on the **Real Sports** app. Built with Ridge Regression machine learning, exact dynamic programming lineup optimization, starting goalie matchup tracking, and correlated teammate stacking.
+Quantitative draft optimizer and sports analytics terminal for NHL contests on the **Real Sports** mobile app. Engineered with Generalized Linear Models (Poisson & Ridge Regression), schedule fatigue analytics, opponent penalty kill modulation, vectorized Monte-Carlo covariance simulation, exact $O(5N)$ dynamic programming lineup optimization, fault-tolerant scraping with TOI line fallback, and automatic draft screenshot OCR parsing.
 
-## Features
+---
 
-- **xRRS Calculation**: Predicts player performance based on historical stats, opponent defense metrics, starting goalie save percentages, line combinations (EV Line 1-4, D1-3), and Power Play deployment (PP1/PP2), with Bayesian shrinkage for small-sample skaters ($gp < 10$).
-- **Exact DP Optimizer**: Evaluates optimal 5-slot lineups using exact $O(5N)$ dynamic programming obeying the rearrangement inequality in $<1$ ms.
-- **Line Deployment Intel**: Scrapes and caches live line combinations and power play units (PP1, PP2, EV Lines) from Daily Faceoff in parallel across all slate teams.
-- **Correlated Teammate Stacks**: Solves for highly correlated combinations (same PP1 unit, PP1 QB + Forward, L1+PP1 linemates) with dynamic synergy multipliers to maximize tournament ceiling.
-- **Starting Goalie Intel**: Scrapes confirmed starting netminders from Daily Faceoff with slate matchup verification, multi-date composite caching, and official NHL API fallback.
-- **Automated Settlement**: Fetches completed match boxscores from NHL Gamecenter (`/boxscore`) to track actual goals, assists, shots, and blocked shots, with automatic DNP handling and resilient game log fallback for games $\ge 3$ days old.
-- **Partitioned Boosters**: Formats `boosters.txt` grouped by team with line combination comments (e.g. `# L1/PP1`), automatic name deduplication (e.g., Sebastian Aho F vs. D, Elias Pettersson C vs. D), activation hints for depth players, and flexible booster parsing (supports `80%`, `0.8`, `1,5`, `1.4x`).
-- **NHL Timezone Handling**: Accurately aligns slate dates using America/New_York time across European and Asian timezones.
-- **Out-of-sample ML Validation**: Tests prediction models against a 20-game rolling average baseline.
+## Key Features
+
+- **Advanced Feature Engineering & xRRS Projections**:
+  - Predicts individual skater performance using Poisson GLM (log-link) for discrete scoring counts (goals and assists) and Ridge Regression for continuous time-on-ice (`xTOI`).
+  - Incorporates schedule fatigue metrics: home ice advantage (`is_home`), back-to-back fatigue (`is_b2b`), rest days differential (`rest_days`), and opponent fatigue status (`opp_is_b2b`).
+  - Modulates power play units (`PP1`/`PP2`) dynamically based on opponent penalty kill efficiency (`opp_pk_pct`) and penalty frequency (`opp_times_shorthanded`).
+  - Applies Bayesian shrinkage against positional priors for skaters with small sample sizes ($GP < 10$).
+- **Vectorized Monte-Carlo Covariance Simulation (`--stack`)**:
+  - Simulates 10,000 correlated slate iterations in $< 20$ ms via Cholesky decomposition of empirical covariance matrix $\Sigma = D R D$.
+  - Models offensive teammate co-occurrence across deployment tiers (`L1+PP1`, `PP1 QB + Forward`, `L1 linemates`).
+  - Computes actionable distribution quantiles:
+    - **Expected Score (Mean)**: mathematical payout expectation.
+    - **Floor (25th percentile)**: downside risk scenario for Cash games.
+    - **Ceiling (90th / 95th percentile)**: explosive upside potential for GPP tournaments.
+- **Exact Dynamic Programming Optimizer**:
+  - Solves the optimal 5-slot booster configuration in $O(5N)$ using the rearrangement inequality in $< 1$ ms.
+  - Supports configurable slot multipliers (e.g. `--slots 2.0,1.8,1.6,1.4,1.2`).
+- **Scraping Fault Tolerance & Network Resilience**:
+  - Centralized retry mechanism with exponential backoff on transient HTTP status codes (`429`, `500`, `502`, `503`, `504`) and network dropouts.
+  - Automatic line combination fallback: if Daily Faceoff fails or alters HTML, dynamically reconstructs forward lines (`L1-L4`), defense pairings (`D1-D3`), and power play units (`PP1/PP2`) from official NHL stats API time-on-ice profiles (`skater/timeonice`).
+- **Draft Screenshot OCR & Booster Auto-Fill (`--parse-images`)**:
+  - Automatically extracts player names and booster multipliers (`+0.4`, `1.2x`, `+20%`, `0.8`, `3.0`) from screenshots of the Real Sports mobile app draft screen.
+  - High-performance fuzzy matching via `RapidFuzz` (with `difflib` fallback) matching noisy OCR text to active game-day skaters.
+  - Handles namesakes and duplicate player disambiguation (e.g., `Elias Pettersson (D)` vs `Elias Pettersson (C)`).
+  - Automatically updates `boosters.txt` preserving team section formatting and syncs directly to the SQLite database.
+- **Settlement & Scoring Calibration**:
+  - Fetches official NHL boxscores to settle historical contests.
+  - Re-calibrates scoring formula weights via OLS regression (`--calibrate`) against ground-truth mobile app payouts (`app_rrs` and `app_payout`).
+  - Out-of-sample backtest suite (`--train`) benchmarking rolling averages, Ridge regression, and Poisson GLM side-by-side with zero look-ahead bias.
+
+---
 
 ## Quickstart
 
@@ -27,10 +49,19 @@ pip install -r requirements.txt
 ```bash
 python main.py --sync
 ```
-Downloads today's NHL schedule, matches starting goalies, synchronizes line combinations, filters injuries, and generates `boosters.txt`.
+Fetches today's NHL schedule, matches starting goalies, synchronizes line combinations, filters injured players, and generates partitioned `boosters.txt`.
 
-### 3. Set Boosters (`boosters.txt`)
-Fill in player multipliers from the Real Sports app (supports percentages, multipliers, and decimals; comments indicate player lines and PP units):
+### 3. Set Boosters
+
+#### Option A: Automatic Screenshot Parsing (Recommended)
+Take screenshots of the draft screen in the Real Sports app, place them in a folder (e.g. `screenshots/`), and run:
+```bash
+python main.py --parse-images screenshots
+```
+The engine will run OCR, match players via fuzzy search, and automatically populate `boosters.txt` and the database.
+
+#### Option B: Manual Editing (`boosters.txt`)
+Edit `boosters.txt` directly (supports percentages, multipliers, decimals, and commas):
 ```text
 Nathan MacKinnon         = 0.0  # L1/PP1
 Cale Makar               = 0.4  # D1/PP1
@@ -53,25 +84,32 @@ python main.py
 chmod +x run.sh && ./run.sh
 ```
 
-### 5. Run Offline Tests
+### 5. Run Offline Test Suite
 ```bash
+pytest -v
+# or
 python -m unittest discover -s tests -v
 ```
+
+---
 
 ## Command Reference
 
 | Command | Description |
 | :--- | :--- |
-| `python main.py` | Generates standard optimal and tournament stack lineups. |
-| `python main.py --stack` | Solves exclusively for correlated teammate stacks. |
-| `python main.py --sync` | Fetches active NHL roster, starting goalies, and refreshes `boosters.txt`. |
+| `python main.py` | Generates standard optimal lineup and correlated tournament stack with Monte-Carlo distribution metrics. |
+| `python main.py --stack` | Solves exclusively for correlated tournament stacks. |
+| `python main.py --parse-images <folder>` | Runs OCR on mobile app screenshots from folder, fuzzy matches active players, and auto-populates `boosters.txt`. |
+| `python main.py --sync` | Fetches active NHL roster, starting goalies, lines, and initializes/refreshes `boosters.txt`. |
 | `python main.py --date YYYY-MM-DD` | Runs optimizer for a specific slate date. |
-| `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific date. |
-| `python main.py --history` | Performance tracking table with cumulative profit and settled status. |
-| `python main.py --record [date]` | Records actual Real Sports app ratings (app_rrs) & payouts for ground-truth calibration. |
-| `python main.py --slots 2.0,1.8,...` | Runs optimizer with custom slot multipliers. |
-| `python main.py --calibrate` | Runs OLS empirical regression to reverse-engineer app scoring weights and verify multiplier stacking. |
-| `python main.py --train` | Runs out-of-sample ML and lineup-level validation (strictly point-in-time, no look-ahead bias). |
+| `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific historical or future slate date. |
+| `python main.py --history [date\|all]` | Performance tracking report with cumulative payout, ROI, and settled contest statistics. |
+| `python main.py --record [date]` | Records verified ground-truth Real Sports mobile app ratings (`app_rrs`) and payouts (`app_payout`). |
+| `python main.py --slots 2.0,1.8,...` | Runs optimizer with custom slot multipliers (default: `2.0,1.8,1.6,1.4,1.2`). |
+| `python main.py --calibrate` | OLS empirical regression reverse-engineering app scoring weights and verifying additive vs multiplicative mechanics. |
+| `python main.py --train` | Runs comparative multi-model benchmark (Rolling Average, Ridge, Poisson GLM) with strict point-in-time cross-validation. |
+
+---
 
 ## License
 

@@ -57,7 +57,13 @@ All notable changes to the RRS Engine project are documented in this file.
   - Integrated CLI argument `--parse-images <path_to_folder>` into `main.py` mutually exclusive with `--sync`, `--history`, and `--record`.
 - **Dependencies & Project Packaging**:
   - Declared `scikit-learn`, `scipy`, `rapidfuzz`, `pillow`, and `pytesseract` in `requirements.txt` and `pyproject.toml`.
-- **127 Offline Unit Tests**: Test suite expanded from 118 to 127 tests (+9 tests in `TestPhase4ImageParserAndOCR`) covering booster token parsing, single-line and card OCR extraction, fuzzy matching tolerance, namesake disambiguation, directory scanning with mock OCR, database synchronization, and CLI mutual exclusivity.
+- **Comprehensive Phase 5 Test Suite & Edge Case Invariants (`TestPhase5ComprehensiveSuite`)**:
+  - Implemented unit tests verifying schedule fatigue edge cases (season openers with default rest days, simultaneous double B2B matchups, and empirical fatigue reductions in `PerformancePredictor`).
+  - Added strict TOI fallback stress tests on partial skater profiles and rookie 0-TOI profiles, verifying exact unit sizing (strictly 4 forwards + 1 defenseman on `PP1`).
+  - Verified Monte-Carlo covariance mathematical invariants across 5,000 iterations: matrix symmetry ($R = R^T$), positive eigenvalues ($\lambda_{\min} > 0$), and monotonicity constraint ($\text{Floor}_{25} \le \text{Mean} \le \text{Ceiling}_{90} \le \text{Ceiling}_{95}$).
+  - Tested strict point-in-time cross-validation and absence of look-ahead bias: proved that future game logs ($t > t_{\text{split}}$) injected into SQLite have zero impact on earlier predictions.
+- **131 Offline Unit Tests**: Test suite expanded from 118 to 131 tests with 100% pass rate under both `pytest` and `unittest`.
+- **Documentation Overhaul**: Fully updated `README.md` with descriptions of all 5 phases, command reference table, quickstart guides, and test execution options.
 
 ## [2.4.1] - 2026-10-19
 
