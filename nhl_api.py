@@ -108,7 +108,7 @@ class NHLClient:
                 return cached
 
         url = "https://api-web.nhle.com/v1/standings/now"
-        metrics = {}
+        metrics: Dict[str, Dict[str, float]] = {}
         try:
             res = self.session.get(url, timeout=10)
             if res.status_code == 200:
@@ -123,7 +123,9 @@ class NHLClient:
                     if gp == 0:
                         metrics[team] = {
                             "ga_per_game": 3.0,
-                            "defense_factor": 1.0
+                            "defense_factor": 1.0,
+                            "pk_pct": 0.80,
+                            "times_shorthanded_per_game": 3.0
                         }
                         continue
                     ga = s.get("goalAgainst", 0)
@@ -137,8 +139,29 @@ class NHLClient:
                     ratio = ga_pg / league_avg_ga if league_avg_ga > 0 else 1.0
                     metrics[team] = {
                         "ga_per_game": round(ga_pg, 2),
-                        "defense_factor": round(ratio, 3)
+                        "defense_factor": round(ratio, 3),
+                        "pk_pct": 0.80,
+                        "times_shorthanded_per_game": 3.0
                     }
+
+                # Enrich with official special teams metrics (PK% and times shorthanded)
+                try:
+                    curr_season = f"{current_season_start_year()}{current_season_start_year()+1}"
+                    pk_url = f"https://api.nhle.com/stats/rest/en/team/penaltykill?cayenneExp=seasonId={curr_season}%20and%20gameTypeId=2"
+                    pk_res = self.session.get(pk_url, timeout=6)
+                    if pk_res.status_code == 200:
+                        pk_rows = pk_res.json().get("data", [])
+                        name_to_abbrev = {name_key(slug.replace("-", " ")): t for t, slug in TEAM_TO_SLUG.items()}
+                        for row in pk_rows:
+                            full_name = row.get("teamFullName", "")
+                            t_abbr = name_to_abbrev.get(name_key(full_name))
+                            if t_abbr and t_abbr in metrics:
+                                pk_pct = float(row.get("penaltyKillPct", 0.80) or 0.80)
+                                ts_pg = float(row.get("timesShorthandedPerGame", 3.0) or 3.0)
+                                metrics[t_abbr]["pk_pct"] = round(pk_pct, 4)
+                                metrics[t_abbr]["times_shorthanded_per_game"] = round(ts_pg, 2)
+                except Exception:
+                    pass
 
                 self.db.save_standings(metrics)
         except Exception as e:

@@ -1,6 +1,18 @@
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Any, Tuple, Optional
+try:
+    from sklearn.linear_model import PoissonRegressor, TweedieRegressor
+except ImportError:
+    PoissonRegressor = None
+    TweedieRegressor = None
+try:
+    from scipy.stats import spearmanr
+except ImportError:
+    def spearmanr(a, b):
+        class _Result:
+            statistic = 0.0
+        return _Result()
 
 
 def parse_toi(toi_str: str) -> float:
@@ -61,12 +73,15 @@ def compute_line_factor(
     ev_line: Optional[str] = None,
     pp_unit: Optional[str] = None,
     position: str = "F",
-    team_has_pp: bool = True
+    team_has_pp: bool = True,
+    opp_pk_pct: Optional[float] = None,
+    opp_times_shorthanded: Optional[float] = None
 ) -> Tuple[float, float, float]:
     """
-    Computes (goal_mult, assist_mult, toi_adj) based on EV line deployment and PP unit.
-    - PP1: +12% goals, +18% assists, +1.5 min TOI
-    - PP2: +4% goals, +5% assists, +0.5 min TOI
+    Computes (goal_mult, assist_mult, toi_adj) based on EV line deployment, PP unit,
+    and opponent penalty kill & discipline metrics.
+    - PP1: +12% goals, +18% assists, +1.5 min TOI (modulated by opponent PK vulnerability and penalty frequency)
+    - PP2: +4% goals, +5% assists, +0.5 min TOI (modulated by opponent PK vulnerability and penalty frequency)
     - No PP (when EV line is known and team has PP data): -8% goals, -12% assists, -0.5 min TOI
     - EV deployment:
       - L1: +5% goals, +5% assists, +1.0 min TOI
@@ -77,7 +92,6 @@ def compute_line_factor(
       - D2: 0.0
       - D3: -8% assists, -2.5 min TOI
       - D4: -15% assists, -4.0 min TOI
-    If ev_line and pp_unit are None, returns (1.0, 1.0, 0.0).
     """
     if not ev_line and not pp_unit:
         return 1.0, 1.0, 0.0
@@ -86,15 +100,27 @@ def compute_line_factor(
     a_mult = 1.0
     toi_adj = 0.0
 
+    # Opponent Special Teams Matchup Modulation (PK quality and penalty frequency)
+    if opp_pk_pct is not None or opp_times_shorthanded is not None:
+        pk = float(opp_pk_pct if opp_pk_pct is not None else 0.80)
+        ts = float(opp_times_shorthanded if opp_times_shorthanded is not None else 3.0)
+        pk_vuln = (1.0 - pk) / 0.20
+        pen_freq = ts / 3.0
+        pp_matchup = float(np.clip(0.6 * pk_vuln + 0.4 * pen_freq, 0.70, 1.40))
+        toi_scale = float(np.clip(pen_freq, 0.75, 1.35))
+    else:
+        pp_matchup = 1.0
+        toi_scale = 1.0
+
     # PP Adjustment
     if pp_unit == "PP1":
-        g_mult += 0.12
-        a_mult += 0.18
-        toi_adj += 1.5
+        g_mult += 0.12 * pp_matchup
+        a_mult += 0.18 * pp_matchup
+        toi_adj += 1.5 * toi_scale
     elif pp_unit == "PP2":
-        g_mult += 0.04
-        a_mult += 0.05
-        toi_adj += 0.5
+        g_mult += 0.04 * pp_matchup
+        a_mult += 0.05 * pp_matchup
+        toi_adj += 0.5 * toi_scale
     elif pp_unit is None and ev_line and team_has_pp:
         g_mult -= 0.08
         a_mult -= 0.12
@@ -134,9 +160,10 @@ def compute_line_factor(
 
 
 class PerformancePredictor:
-    def __init__(self):
+    def __init__(self, model_type: str = "poisson"):
+        self.model_type = str(model_type or "poisson").lower()
         self.multi_model: Optional[RidgeRegression] = None
-        self.models: Dict[str, RidgeRegression] = {}
+        self.glm_models: Dict[str, Any] = {}
         self.trained = False
         self.baseline: Dict[str, float] = {}
 
@@ -150,7 +177,7 @@ class PerformancePredictor:
         standings: Dict[str, Dict[str, float]]
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         if len(game_logs) < 6:
-            return np.empty((0, 15)), {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")}
+            return np.empty((0, 19)), {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")}
 
         parsed = []
         for g in game_logs:
@@ -160,8 +187,11 @@ class PerformancePredictor:
                 "assists": float(g.get("assists", 0)),
                 "shots": float(g.get("shots", 0)),
                 "toi": parse_toi(g.get("toi", "00:00")),
-                "is_home": 1.0 if g.get("homeRoadFlag") == "H" else 0.0,
-                "opp": g.get("opponentAbbrev", "")
+                "is_home": 1.0 if (g.get("homeRoadFlag") == "H" or g.get("is_home") in (1, True)) else 0.0,
+                "opp": g.get("opponentAbbrev", ""),
+                "is_b2b": float(g.get("is_b2b", 0)),
+                "rest_days": float(g.get("rest_days", 2.0)),
+                "opp_is_b2b": float(g.get("opp_is_b2b", 0))
             })
 
         X_rows = []
@@ -176,10 +206,15 @@ class PerformancePredictor:
                 d_prev = datetime.strptime(prev["date"], "%Y-%m-%d")
                 rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
             except Exception:
-                rest = 2.0
+                rest = float(curr.get("rest_days", 2.0))
+
+            is_b2b = 1.0 if rest <= 1.0 else float(curr.get("is_b2b", 0.0))
+            opp_is_b2b = float(curr.get("opp_is_b2b", 0.0))
 
             opp_info = standings.get(curr["opp"], {})
-            opp_def = opp_info.get("defense_factor", 1.0)
+            opp_def = float(opp_info.get("defense_factor", 1.0))
+            opp_pk = float(opp_info.get("pk_pct", 0.80))
+            opp_ts = float(opp_info.get("times_shorthanded_per_game", 3.0))
 
             last5 = parsed[max(0, i - 5):i]
             last20 = parsed[max(0, i - 20):i]
@@ -200,7 +235,11 @@ class PerformancePredictor:
                 np.mean([x["toi"] for x in career]),
                 curr["is_home"],
                 rest,
-                opp_def
+                opp_def,
+                is_b2b,
+                opp_is_b2b,
+                opp_pk,
+                opp_ts
             ]
 
             X_rows.append(feat)
@@ -232,6 +271,43 @@ class PerformancePredictor:
             self.trained = False
             return
 
+        # Train GLM models (Poisson / Tweedie) for right-skewed count outcomes
+        if self.model_type in ("poisson", "tweedie") and PoissonRegressor is not None:
+            self.glm_models = {}
+            mean_X = np.mean(X, axis=0)
+            std_X = np.std(X, axis=0)
+            std_X[std_X == 0.0] = 1.0
+            Z = (X - mean_X) / std_X
+
+            try:
+                # Count models with log-link: goals & assists
+                g_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                g_model.fit(Z, y_dict["goals"])
+                self.glm_models["goals"] = (g_model, mean_X, std_X)
+
+                a_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                a_model.fit(Z, y_dict["assists"])
+                self.glm_models["assists"] = (a_model, mean_X, std_X)
+
+                # Shots: Poisson or Tweedie (compound Poisson)
+                if self.model_type == "tweedie" and TweedieRegressor is not None:
+                    s_model = TweedieRegressor(power=1.5, alpha=1.5, max_iter=300)
+                else:
+                    s_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                s_model.fit(Z, y_dict["shots"])
+                self.glm_models["shots"] = (s_model, mean_X, std_X)
+
+                # TOI: Gaussian linear / Ridge regression
+                toi_model = RidgeRegression(alpha=15.0)
+                toi_model.fit(X, y_dict["toi"])
+                self.glm_models["toi"] = toi_model
+
+                self.trained = True
+                return
+            except Exception:
+                self.glm_models = {}
+
+        # Fallback / Classic: Multi-output Ridge regression
         y_mat = np.column_stack([y_dict[target] for target in ("goals", "assists", "shots", "toi")])
         self.multi_model = RidgeRegression(alpha=15.0)
         self.multi_model.fit(X, y_mat)
@@ -248,19 +324,31 @@ class PerformancePredictor:
         goalie_factor: float = 1.0,
         ev_line: Optional[str] = None,
         pp_unit: Optional[str] = None,
-        team_has_pp: bool = True
+        team_has_pp: bool = True,
+        is_b2b: bool = False,
+        rest_days: Optional[float] = None,
+        opp_is_b2b: bool = False,
+        opp_pk_pct: Optional[float] = None,
+        opp_times_shorthanded: Optional[float] = None
     ) -> Dict[str, Any]:
         pos_key = "D" if str(position).upper() in ("D", "DEF") else "F"
         pos_avg = POS_AVERAGES[pos_key]
         opp_info = (standings or {}).get(opponent_abbrev, {})
         opp_def = float(opp_info.get("defense_factor", 1.0))
+        pk_val = float(opp_pk_pct if opp_pk_pct is not None else opp_info.get("pk_pct", 0.80))
+        ts_val = float(opp_times_shorthanded if opp_times_shorthanded is not None else opp_info.get("times_shorthanded_per_game", 3.0))
+
         home_boost = 1.05 if is_home else 0.95
+        # Fatigue penalty / boost
+        fatigue_mult = 0.96 if is_b2b else 1.0
+        if opp_is_b2b:
+            fatigue_mult *= 1.03
 
         if not game_logs:
             preds = {
-                "goals": max(0.0, pos_avg["goals"] * opp_def * home_boost),
-                "assists": max(0.0, pos_avg["assists"] * opp_def * home_boost),
-                "shots": max(0.0, pos_avg["shots"] * opp_def * home_boost),
+                "goals": max(0.0, pos_avg["goals"] * opp_def * home_boost * fatigue_mult),
+                "assists": max(0.0, pos_avg["assists"] * opp_def * home_boost * fatigue_mult),
+                "shots": max(0.0, pos_avg["shots"] * opp_def * home_boost * fatigue_mult),
                 "toi": max(5.0, pos_avg["toi"])
             }
             if goalie_factor != 1.0:
@@ -276,12 +364,18 @@ class PerformancePredictor:
             } for g in game_logs]
 
             last = parsed[-1]
-            try:
-                d_curr = datetime.strptime(game_date, "%Y-%m-%d")
-                d_prev = datetime.strptime(last["date"], "%Y-%m-%d")
-                rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
-            except Exception:
-                rest = 2.0
+            if rest_days is not None:
+                rest = min(5.0, max(0.0, float(rest_days)))
+            else:
+                try:
+                    d_curr = datetime.strptime(game_date, "%Y-%m-%d")
+                    d_prev = datetime.strptime(last["date"], "%Y-%m-%d")
+                    rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
+                except Exception:
+                    rest = 2.0
+
+            eff_is_b2b = 1.0 if (is_b2b or rest <= 1.0) else 0.0
+            eff_opp_is_b2b = 1.0 if opp_is_b2b else 0.0
 
             last5 = parsed[-5:] if len(parsed) >= 5 else parsed
             last20 = parsed[-20:] if len(parsed) >= 20 else parsed
@@ -301,17 +395,49 @@ class PerformancePredictor:
                 np.mean([x["toi"] for x in parsed]),
                 1.0 if is_home else 0.0,
                 rest,
-                opp_def
-            ]])
+                opp_def,
+                eff_is_b2b,
+                eff_opp_is_b2b,
+                pk_val,
+                ts_val
+            ]], dtype=np.float64)
 
             preds = {}
-            if self.trained and self.multi_model is not None:
-                raw_preds = self.multi_model.predict(x_vec)[0]
-                preds["goals"] = max(0.0, float(raw_preds[0]))
-                preds["assists"] = max(0.0, float(raw_preds[1]))
-                preds["shots"] = max(0.0, float(raw_preds[2]))
+            if self.trained and self.glm_models:
+                try:
+                    g_mod, mean_X, std_X = self.glm_models["goals"]
+                    z_vec = (x_vec - mean_X) / std_X
+                    raw_g = float(g_mod.predict(z_vec)[0])
+
+                    a_mod, _, _ = self.glm_models["assists"]
+                    raw_a = float(a_mod.predict(z_vec)[0])
+
+                    s_mod, _, _ = self.glm_models["shots"]
+                    raw_s = float(s_mod.predict(z_vec)[0])
+
+                    toi_mod = self.glm_models["toi"]
+                    # toi_mod is Ridge, expecting original X
+                    raw_toi = float(toi_mod.predict(x_vec)[0])
+
+                    preds["goals"] = max(0.0, raw_g * fatigue_mult)
+                    preds["assists"] = max(0.0, raw_a * fatigue_mult)
+                    preds["shots"] = max(0.0, raw_s * fatigue_mult)
+                    preds["toi"] = max(0.0, raw_toi)
+                except Exception:
+                    preds = {}
+
+            if not preds and self.trained and self.multi_model is not None:
+                # Multi-output Ridge prediction
+                # If trained on 19 features, use full vector; if legacy 15 features, slice
+                p_dim = self.multi_model.coef_.shape[0] if self.multi_model.coef_ is not None else 19
+                in_vec = x_vec if p_dim == 19 else x_vec[:, :15]
+                raw_preds = self.multi_model.predict(in_vec)[0]
+                preds["goals"] = max(0.0, float(raw_preds[0]) * fatigue_mult)
+                preds["assists"] = max(0.0, float(raw_preds[1]) * fatigue_mult)
+                preds["shots"] = max(0.0, float(raw_preds[2]) * fatigue_mult)
                 preds["toi"] = max(0.0, float(raw_preds[3]))
-            else:
+
+            if not preds:
                 gp = len(parsed)
                 k = 10.0
                 r5_g = np.mean([x["goals"] for x in last5])
@@ -327,18 +453,19 @@ class PerformancePredictor:
                 else:
                     adj_g, adj_a, adj_s, adj_toi = r5_g, r5_a, r5_s, r5_toi
 
-                preds["goals"] = max(0.0, adj_g * opp_def * home_boost)
-                preds["assists"] = max(0.0, adj_a * opp_def * home_boost)
-                preds["shots"] = max(0.0, adj_s * opp_def * home_boost)
+                preds["goals"] = max(0.0, adj_g * opp_def * home_boost * fatigue_mult)
+                preds["assists"] = max(0.0, adj_a * opp_def * home_boost * fatigue_mult)
+                preds["shots"] = max(0.0, adj_s * opp_def * home_boost * fatigue_mult)
                 preds["toi"] = max(5.0, adj_toi)
 
             if goalie_factor != 1.0:
                 preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
                 preds["assists"] = max(0.0, preds["assists"] * (1.0 + 0.5 * (goalie_factor - 1.0)))
 
-        # Line combination & power play deployment adjustment
+        # Line combination & power play deployment adjustment (including opponent PK/discipline)
         g_line_mult, a_line_mult, toi_line_adj = compute_line_factor(
-            ev_line, pp_unit, position=position, team_has_pp=team_has_pp
+            ev_line, pp_unit, position=position, team_has_pp=team_has_pp,
+            opp_pk_pct=pk_val, opp_times_shorthanded=ts_val
         )
         if (g_line_mult, a_line_mult, toi_line_adj) != (1.0, 1.0, 0.0):
             preds["goals"] = max(0.0, preds["goals"] * g_line_mult)
@@ -618,8 +745,11 @@ def evaluate_model(
 
     pit_standings = {} if point_in_time else (standings or {})
 
-    errors = {"goals": [], "assists": [], "shots": [], "toi": []}
-    base_errors = {"goals": [], "assists": [], "shots": [], "toi": []}
+    actuals = {"goals": [], "assists": [], "shots": [], "toi": []}
+    preds_base = {"goals": [], "assists": [], "shots": [], "toi": []}
+    preds_ridge = {"goals": [], "assists": [], "shots": [], "toi": []}
+    preds_glm = {"goals": [], "assists": [], "shots": [], "toi": []}
+
     tested_players = 0
 
     for p in players:
@@ -632,57 +762,155 @@ def evaluate_model(
         train_logs = logs[:split]
         test_logs = logs[split:]
 
-        model = PerformancePredictor()
-        model.train(train_logs, pit_standings)
+        # Train both Classic (Ridge) and New (Poisson/GLM) pipelines on strict historical train logs
+        model_ridge = PerformancePredictor(model_type="ridge")
+        model_ridge.train(train_logs, pit_standings)
+
+        model_glm = PerformancePredictor(model_type="poisson")
+        model_glm.train(train_logs, pit_standings)
 
         for i, test_game in enumerate(test_logs):
             history = logs[:split + i]
-            pred = model.predict(
+            is_h = (test_game.get("homeRoadFlag") == "H" or test_game.get("is_home") in (1, True))
+            opp = test_game.get("opponentAbbrev", "")
+            g_date = test_game.get("gameDate", "2026-01-01")
+            pos = p.get("position", "F")
+            is_b2b_val = bool(test_game.get("is_b2b", 0))
+            rest_val = float(test_game.get("rest_days", 2.0))
+            opp_b2b_val = bool(test_game.get("opp_is_b2b", 0))
+
+            pred_r = model_ridge.predict(
                 game_logs=history,
-                is_home=(test_game.get("homeRoadFlag") == "H"),
-                opponent_abbrev=test_game.get("opponentAbbrev", ""),
-                game_date=test_game.get("gameDate", "2026-01-01"),
+                is_home=is_h,
+                opponent_abbrev=opp,
+                game_date=g_date,
                 standings=pit_standings,
-                position=p.get("position", "F")
+                position=pos,
+                is_b2b=is_b2b_val,
+                rest_days=rest_val,
+                opp_is_b2b=opp_b2b_val
             )
 
-            actual_g = float(test_game.get("goals", 0))
-            actual_a = float(test_game.get("assists", 0))
-            actual_s = float(test_game.get("shots", 0))
-            actual_toi = parse_toi(test_game.get("toi", "00:00"))
-            pred_toi = parse_toi(pred["xTOI"])
+            pred_g = model_glm.predict(
+                game_logs=history,
+                is_home=is_h,
+                opponent_abbrev=opp,
+                game_date=g_date,
+                standings=pit_standings,
+                position=pos,
+                is_b2b=is_b2b_val,
+                rest_days=rest_val,
+                opp_is_b2b=opp_b2b_val
+            )
 
-            errors["goals"].append(abs(pred["xG"] - actual_g))
-            errors["assists"].append(abs(pred["xA"] - actual_a))
-            errors["shots"].append(abs(pred["xSOG"] - actual_s))
-            errors["toi"].append(abs(pred_toi - actual_toi))
+            act_g = float(test_game.get("goals", 0))
+            act_a = float(test_game.get("assists", 0))
+            act_s = float(test_game.get("shots", 0))
+            act_toi = parse_toi(test_game.get("toi", "00:00"))
 
-            # 20-game rolling average baseline
+            # 20-game rolling baseline
             last20 = history[-20:] if len(history) >= 20 else history
-            base_g = np.mean([float(x.get("goals", 0)) for x in last20])
-            base_a = np.mean([float(x.get("assists", 0)) for x in last20])
-            base_s = np.mean([float(x.get("shots", 0)) for x in last20])
-            base_toi = np.mean([parse_toi(x.get("toi", "00:00")) for x in last20])
+            b_g = float(np.mean([float(x.get("goals", 0)) for x in last20]))
+            b_a = float(np.mean([float(x.get("assists", 0)) for x in last20]))
+            b_s = float(np.mean([float(x.get("shots", 0)) for x in last20]))
+            b_toi = float(np.mean([parse_toi(x.get("toi", "00:00")) for x in last20]))
 
-            base_errors["goals"].append(abs(base_g - actual_g))
-            base_errors["assists"].append(abs(base_a - actual_a))
-            base_errors["shots"].append(abs(base_s - actual_s))
-            base_errors["toi"].append(abs(base_toi - actual_toi))
+            actuals["goals"].append(act_g)
+            actuals["assists"].append(act_a)
+            actuals["shots"].append(act_s)
+            actuals["toi"].append(act_toi)
+
+            preds_base["goals"].append(b_g)
+            preds_base["assists"].append(b_a)
+            preds_base["shots"].append(b_s)
+            preds_base["toi"].append(b_toi)
+
+            preds_ridge["goals"].append(pred_r["xG"])
+            preds_ridge["assists"].append(pred_r["xA"])
+            preds_ridge["shots"].append(pred_r["xSOG"])
+            preds_ridge["toi"].append(parse_toi(pred_r["xTOI"]))
+
+            preds_glm["goals"].append(pred_g["xG"])
+            preds_glm["assists"].append(pred_g["xA"])
+            preds_glm["shots"].append(pred_g["xSOG"])
+            preds_glm["toi"].append(parse_toi(pred_g["xTOI"]))
 
         tested_players += 1
 
-    if not errors["goals"]:
+    if not actuals["goals"]:
         print("Not enough game logs found to evaluate model.")
         return
 
-    print("-" * 68)
+    def calc_spearman(y_true, y_pred):
+        if len(y_true) < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
+            return 0.0
+        try:
+            res = spearmanr(y_true, y_pred)
+            val = float(getattr(res, "statistic", getattr(res, "correlation", 0.0)))
+            return 0.0 if np.isnan(val) else val
+        except Exception:
+            return 0.0
+
+    targets = ("goals", "assists", "shots", "toi")
+    mae_base = {}
+    rmse_base = {}
+    sp_base = {}
+    mae_ridge = {}
+    rmse_ridge = {}
+    sp_ridge = {}
+    mae_glm = {}
+    rmse_glm = {}
+    sp_glm = {}
+
+    for t in targets:
+        y_act = np.array(actuals[t], dtype=np.float64)
+        y_b = np.array(preds_base[t], dtype=np.float64)
+        y_r = np.array(preds_ridge[t], dtype=np.float64)
+        y_g = np.array(preds_glm[t], dtype=np.float64)
+
+        mae_base[t] = float(np.mean(np.abs(y_b - y_act)))
+        rmse_base[t] = float(np.sqrt(np.mean((y_b - y_act) ** 2)))
+        sp_base[t] = calc_spearman(y_act, y_b)
+
+        mae_ridge[t] = float(np.mean(np.abs(y_r - y_act)))
+        rmse_ridge[t] = float(np.sqrt(np.mean((y_r - y_act) ** 2)))
+        sp_ridge[t] = calc_spearman(y_act, y_r)
+
+        mae_glm[t] = float(np.mean(np.abs(y_g - y_act)))
+        rmse_glm[t] = float(np.sqrt(np.mean((y_g - y_act) ** 2)))
+        sp_glm[t] = calc_spearman(y_act, y_g)
+
+    print("-" * 75)
     leak_note = "Strict point-in-time (no look-ahead leakage)" if point_in_time else "End-of-season standings (with look-ahead)"
-    print(f"Validation Results: {tested_players} players, {len(errors['goals'])} test games [{leak_note}]:")
-    print(f"  Goals (MAE):    {np.mean(errors['goals']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['goals']):.3f})")
-    print(f"  Assists (MAE):  {np.mean(errors['assists']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['assists']):.3f})")
-    print(f"  Shots (MAE):    {np.mean(errors['shots']):.3f} per game  (Baseline 20-game avg: {np.mean(base_errors['shots']):.3f})")
-    print(f"  TOI (MAE):      {np.mean(errors['toi']):.2f} min       (Baseline 20-game avg: {np.mean(base_errors['toi']):.2f} min)")
-    print("-" * 68)
+    print(f"Validation Results: {tested_players} players, {len(actuals['goals'])} test games [{leak_note}]:")
+    print(f"  Goals (MAE):    {mae_glm['goals']:.3f} per game  (Baseline 20-game avg: {mae_base['goals']:.3f})")
+    print(f"  Assists (MAE):  {mae_glm['assists']:.3f} per game  (Baseline 20-game avg: {mae_base['assists']:.3f})")
+    print(f"  Shots (MAE):    {mae_glm['shots']:.3f} per game  (Baseline 20-game avg: {mae_base['shots']:.3f})")
+    print(f"  TOI (MAE):      {mae_glm['toi']:.2f} min       (Baseline 20-game avg: {mae_base['toi']:.2f} min)")
+    print("-" * 75)
+
+    print("\n" + "=" * 94)
+    print("             MODEL VALIDATION & BENCHMARK COMPARISON (OUT-OF-SAMPLE)")
+    print("=" * 94)
+    print(f"{'Target':<10} {'Metric':<16} {'20-Game Baseline':<18} {'Classic (Ridge)':<18} {'New (Poisson GLM)':<18} {'Delta vs Classic'}")
+    print("-" * 94)
+    for tgt in targets:
+        # MAE
+        d_mae = ((mae_glm[tgt] - mae_ridge[tgt]) / mae_ridge[tgt] * 100) if mae_ridge[tgt] > 0 else 0.0
+        d_mae_str = f"{d_mae:+.1f}% {'(improved)' if d_mae < 0 else ''}"
+        print(f"{tgt.capitalize():<10} {'MAE':<16} {mae_base[tgt]:<18.3f} {mae_ridge[tgt]:<18.3f} {mae_glm[tgt]:<18.3f} {d_mae_str}")
+
+        # RMSE
+        d_rmse = ((rmse_glm[tgt] - rmse_ridge[tgt]) / rmse_ridge[tgt] * 100) if rmse_ridge[tgt] > 0 else 0.0
+        d_rmse_str = f"{d_rmse:+.1f}% {'(improved)' if d_rmse < 0 else ''}"
+        print(f"{'':<10} {'RMSE':<16} {rmse_base[tgt]:<18.3f} {rmse_ridge[tgt]:<18.3f} {rmse_glm[tgt]:<18.3f} {d_rmse_str}")
+
+        # Spearman
+        d_sp = sp_glm[tgt] - sp_ridge[tgt]
+        d_sp_str = f"{d_sp:+.3f} {'(higher rank)' if d_sp > 0 else ''}"
+        print(f"{'':<10} {'Spearman (r_s)':<16} {sp_base[tgt]:<+18.3f} {sp_ridge[tgt]:<+18.3f} {sp_glm[tgt]:<+18.3f} {d_sp_str}")
+        print("-" * 94)
+    print("=" * 94 + "\n")
 
     # Lineup-level validation report
     if hasattr(db, "get_lineup_level_validation_summary"):

@@ -64,7 +64,7 @@ def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str 
     if target_date:
         sub += f" | Date: {target_date}"
     banner = (
-        r"  ____   ____   ____     RRS ENGINE v2.4.1" "\n"
+        r"  ____   ____   ____     RRS ENGINE v2.5.0" "\n"
         r" |  _ \ |  _ \ / ___|    NHL Quant Draft Optimizer | Real Rating System" "\n"
         rf" | |_) || |_) |\___ \    {sub}" "\n"
         r" |  _ < |  _ <  ___) |" "\n"
@@ -560,6 +560,8 @@ def collect_slate_skaters(
     excluded_count = 0
     dtd_skipped_count = 0
 
+    standings = db.get_standings() if db else {}
+
     for team, (opp, is_home) in team_matchups.items():
         skaters = all_club_stats.get(team, [])
         opp_goalie = goalies.get(opp, {})
@@ -567,6 +569,17 @@ def collect_slate_skaters(
         g_name = opp_goalie.get("goalie_name", "")
         t_lines = (team_lines or {}).get(team, {})
         team_has_pp = t_lines.get("_meta", {}).get("has_pp", any(v.get("pp_unit") for k, v in t_lines.items() if isinstance(v, dict) and k != "_meta"))
+
+        sched_ctx = db.get_schedule_context(team, opp, game_date) if (db and game_date) else {
+            "is_home": is_home, "is_b2b": False, "rest_days": 3.0, "opp_is_b2b": False, "opp_rest_days": 3.0
+        }
+        is_b2b = bool(sched_ctx.get("is_b2b", False))
+        rest_days = float(sched_ctx.get("rest_days", 3.0))
+        opp_is_b2b = bool(sched_ctx.get("opp_is_b2b", False))
+
+        opp_info = (standings or {}).get(opp, {})
+        opp_pk_pct = opp_info.get("pk_pct")
+        opp_times_shorthanded = opp_info.get("times_shorthanded_per_game")
 
         for p in skaters:
             p_id = p["playerId"]
@@ -678,7 +691,8 @@ def collect_slate_skaters(
                 s_pg = (p.get("shots", 0) / gp)
 
             g_line_mult, a_line_mult, toi_line_adj = compute_line_factor(
-                ev_line, pp_unit, position=pos, team_has_pp=team_has_pp
+                ev_line, pp_unit, position=pos, team_has_pp=team_has_pp,
+                opp_pk_pct=opp_pk_pct, opp_times_shorthanded=opp_times_shorthanded
             )
             g_pg = max(0.0, g_pg * g_line_mult)
             a_pg = max(0.0, a_pg * a_line_mult)
@@ -709,7 +723,12 @@ def collect_slate_skaters(
                 "pp_unit": pp_unit,
                 "pk_unit": pk_unit,
                 "line_tag": line_tag,
-                "team_has_pp": team_has_pp
+                "team_has_pp": team_has_pp,
+                "is_b2b": is_b2b,
+                "rest_days": rest_days,
+                "opp_is_b2b": opp_is_b2b,
+                "opp_pk_pct": opp_pk_pct,
+                "opp_times_shorthanded": opp_times_shorthanded
             })
 
     if players_to_save:
@@ -1071,7 +1090,8 @@ def build_skater_projection(
     logs: List[Dict[str, Any]],
     standings: Dict[str, Dict[str, float]],
     game_date: str,
-    today_str: Optional[str] = None
+    today_str: Optional[str] = None,
+    db: Optional[Database] = None
 ) -> Tuple[float, float]:
     if today_str is None:
         today_str = nhl_today()
@@ -1085,6 +1105,24 @@ def build_skater_projection(
         ev_line = skater.get("ev_line") if is_future_or_today else None
         pp_unit = skater.get("pp_unit") if is_future_or_today else None
         team_has_pp = skater.get("team_has_pp", True)
+
+        team = skater.get("team", "")
+        is_b2b = bool(skater.get("is_b2b", False))
+        rest_days = skater.get("rest_days")
+        opp_is_b2b = bool(skater.get("opp_is_b2b", False))
+        if db is not None and team and opp_clean and game_date:
+            try:
+                ctx = db.get_schedule_context(team, opp_clean, game_date)
+                is_b2b = bool(ctx.get("is_b2b", is_b2b))
+                rest_days = ctx.get("rest_days", rest_days)
+                opp_is_b2b = bool(ctx.get("opp_is_b2b", opp_is_b2b))
+            except Exception:
+                pass
+
+        opp_info = (standings or {}).get(opp_clean, {})
+        opp_pk_pct = skater.get("opp_pk_pct", opp_info.get("pk_pct"))
+        opp_times_shorthanded = skater.get("opp_times_shorthanded", opp_info.get("times_shorthanded_per_game"))
+
         pred = predictor.predict(
             game_logs=train_logs,
             is_home=skater.get("is_home", True),
@@ -1095,7 +1133,12 @@ def build_skater_projection(
             goalie_factor=skater.get("goalie_factor", 1.0),
             ev_line=ev_line,
             pp_unit=pp_unit,
-            team_has_pp=team_has_pp
+            team_has_pp=team_has_pp,
+            is_b2b=is_b2b,
+            rest_days=rest_days,
+            opp_is_b2b=opp_is_b2b,
+            opp_pk_pct=opp_pk_pct,
+            opp_times_shorthanded=opp_times_shorthanded
         )
         return pred["xRRS"], pred["base_pts"]
     else:
@@ -1197,7 +1240,7 @@ def handle_record_app_scores(db: Database, record_arg: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RRS Engine v2.4.1 - Real Rating System & NHL Quant Draft Optimizer")
+    parser = argparse.ArgumentParser(description="RRS Engine v2.5.0 - Real Rating System & NHL Quant Draft Optimizer")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
@@ -1347,7 +1390,7 @@ def main():
 
         today_str = nhl_today()
         pred_xrrs, base_pts = build_skater_projection(
-            s, logs, standings, game_date, today_str=today_str
+            s, logs, standings, game_date, today_str=today_str, db=db
         )
 
         candidates.append({
@@ -1364,7 +1407,9 @@ def main():
             "line_tag": s.get("line_tag", "--"),
             "xRRS": pred_xrrs,
             "base_pts": base_pts,
-            "booster": s["booster"]
+            "booster": s["booster"],
+            "is_b2b": s.get("is_b2b", False),
+            "opp_is_b2b": s.get("opp_is_b2b", False)
         })
 
     if total_qual > 0:

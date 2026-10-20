@@ -488,7 +488,7 @@ class TestLineupOptimizer(unittest.TestCase):
         with patch("sys.stdout", buf):
             print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
         out = buf.getvalue()
-        self.assertIn("RRS ENGINE v2.4", out)
+        self.assertIn("RRS ENGINE v2.5", out)
         self.assertIn("Mode: Sync Roster & Boosters", out)
         self.assertIn("Date: 2026-10-17", out)
         self.assertIn("____", out)
@@ -2184,6 +2184,175 @@ class TestReviewFixes(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertIsNotNone(res["sample_warning"])
         self.assertIn("Preliminary sample size (n=6 < 15)", out)
+
+
+class TestPhase1FeatureEngineering(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test_phase1.db")
+        self.db = Database(self.db_path)
+        self.client = NHLClient(self.db)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    def test_schedule_context_b2b_and_rest_days(self):
+        schedule_days = [
+            {
+                "date": "2026-10-20",
+                "games": [{"gameId": 1, "homeTeam": "CGY", "awayTeam": "EDM"}]
+            },
+            {
+                "date": "2026-10-18",
+                "games": [{"gameId": 2, "homeTeam": "TOR", "awayTeam": "MTL"}]
+            },
+            {
+                "date": "2026-10-21",
+                "games": [{"gameId": 3, "homeTeam": "EDM", "awayTeam": "TOR"}]
+            }
+        ]
+        self.db.save_schedule(schedule_days)
+
+        ctx = self.db.get_schedule_context("EDM", "TOR", "2026-10-21")
+        self.assertTrue(ctx["is_home"])
+        self.assertEqual(ctx["is_b2b"], 1)
+        self.assertEqual(ctx["rest_days"], 1.0)
+        self.assertEqual(ctx["opp_is_b2b"], 0)
+        self.assertEqual(ctx["opp_rest_days"], 3.0)
+
+    def test_schedule_context_defaults_on_missing_data(self):
+        ctx = self.db.get_schedule_context("EDM", "TOR", "2026-10-21")
+        self.assertTrue(ctx["is_home"])
+        self.assertEqual(ctx["is_b2b"], 0)
+        self.assertEqual(ctx["rest_days"], 2.0)
+        self.assertEqual(ctx["opp_is_b2b"], 0)
+        self.assertEqual(ctx["opp_rest_days"], 2.0)
+
+    def test_standings_pk_and_shorthanded_persistence(self):
+        standings_data = {
+            "EDM": {
+                "games_played": 10,
+                "goals_against_avg": 2.8,
+                "defense_factor": 0.95,
+                "pk_pct": 0.852,
+                "times_shorthanded_per_game": 3.4
+            }
+        }
+        self.db.save_standings(standings_data)
+        retrieved = self.db.get_standings()
+        self.assertIn("EDM", retrieved)
+        self.assertAlmostEqual(retrieved["EDM"]["pk_pct"], 0.852, places=3)
+        self.assertAlmostEqual(retrieved["EDM"]["times_shorthanded_per_game"], 3.4, places=2)
+
+    def test_game_logs_b2b_calculation_and_persistence(self):
+        logs = [
+            {
+                "gameId": 101,
+                "gameDate": "2026-10-15",
+                "season": "20262027",
+                "homeRoadFlag": "H",
+                "opponent": "CGY",
+                "opponentAbbrev": "CGY",
+                "goals": 1,
+                "assists": 0,
+                "shots": 4,
+                "toi": "19:00",
+                "toi_minutes": 19.0
+            },
+            {
+                "gameId": 102,
+                "gameDate": "2026-10-16",
+                "season": "20262027",
+                "homeRoadFlag": "R",
+                "opponent": "VAN",
+                "opponentAbbrev": "VAN",
+                "goals": 0,
+                "assists": 2,
+                "shots": 2,
+                "toi": "18:30",
+                "toi_minutes": 18.5
+            }
+        ]
+        self.db.save_game_logs(5001, logs)
+        saved = self.db.get_game_logs(5001)
+        self.assertEqual(len(saved), 2)
+        self.assertFalse(saved[0]["is_b2b"])
+        self.assertTrue(saved[1]["is_b2b"])
+        self.assertEqual(saved[1]["rest_days"], 1.0)
+
+    def test_compute_line_factor_special_teams_modulation(self):
+        g_base, a_base, toi_base = compute_line_factor("L1", "PP1", position="F", opp_pk_pct=0.80, opp_times_shorthanded=3.0)
+        g_vuln, a_vuln, toi_vuln = compute_line_factor("L1", "PP1", position="F", opp_pk_pct=0.68, opp_times_shorthanded=4.5)
+        g_elite, a_elite, toi_elite = compute_line_factor("L1", "PP1", position="F", opp_pk_pct=0.92, opp_times_shorthanded=1.8)
+
+        self.assertGreater(g_vuln, g_base)
+        self.assertGreater(a_vuln, a_base)
+        self.assertGreater(toi_vuln, toi_base)
+        self.assertLess(g_elite, g_base)
+        self.assertLess(a_elite, a_base)
+        self.assertLess(toi_elite, toi_base)
+
+    def test_performance_predictor_poisson_glm_and_fatigue(self):
+        predictor = PerformancePredictor(model_type="poisson")
+        logs = []
+        for i in range(15):
+            logs.append({
+                "gameId": 200 + i,
+                "gameDate": f"2026-10-{i+1:02d}",
+                "season": "20262027",
+                "homeRoadFlag": "H" if i % 2 == 0 else "R",
+                "opponent": "CGY",
+                "opponentAbbrev": "CGY",
+                "goals": 1 if i % 2 == 0 else 0,
+                "assists": 1 if i % 3 == 0 else 0,
+                "shots": 3,
+                "toi": "20:00",
+                "toi_minutes": 20.0
+            })
+        standings = {"CGY": {"defense_factor": 1.0, "pk_pct": 0.80, "times_shorthanded_per_game": 3.0}}
+        predictor.train(logs, standings)
+
+        pred_normal = predictor.predict(logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20", is_b2b=False, opp_is_b2b=False)
+        pred_b2b = predictor.predict(logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20", is_b2b=True, opp_is_b2b=False)
+        pred_opp_b2b = predictor.predict(logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20", is_b2b=False, opp_is_b2b=True)
+
+        self.assertGreater(pred_normal["xRRS"], pred_b2b["xRRS"])
+        self.assertGreater(pred_opp_b2b["xRRS"], pred_normal["xRRS"])
+        self.assertGreaterEqual(pred_b2b["xG"], 0.0)
+        self.assertGreaterEqual(pred_b2b["xA"], 0.0)
+        self.assertGreaterEqual(pred_b2b["xSOG"], 0.0)
+
+    def test_evaluate_model_comparative_benchmark_output(self):
+        self.db.save_player(88, "Patrick Kane", "DET", "F")
+        logs = []
+        for i in range(32):
+            logs.append({
+                "gameId": 3000 + i,
+                "gameDate": f"2025-10-{i+1:02d}" if i < 30 else f"2025-11-{i-29:02d}",
+                "season": "20252026",
+                "homeRoadFlag": "H" if i % 2 == 0 else "R",
+                "opponent": "CHI",
+                "opponentAbbrev": "CHI",
+                "goals": 1 if i % 4 == 0 else 0,
+                "assists": 1 if i % 2 == 0 else 0,
+                "shots": 3,
+                "toi": "18:00",
+                "toi_minutes": 18.0
+            })
+        self.db.save_game_logs(88, logs)
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            evaluate_model(self.db, standings={"CHI": {"defense_factor": 1.0}}, min_games=30, point_in_time=True)
+        out = buf.getvalue()
+        self.assertIn("MODEL VALIDATION & BENCHMARK COMPARISON", out)
+        self.assertIn("20-Game Baseline", out)
+        self.assertIn("Classic (Ridge)", out)
+        self.assertIn("New (Poisson GLM)", out)
+        self.assertIn("Spearman (r_s)", out)
 
 
 if __name__ == "__main__":

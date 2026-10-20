@@ -2,6 +2,29 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.5.0] - 2026-10-20
+
+### Added
+- **Feature Engineering: Schedule Context & Fatigue (`is_home`, `is_b2b`, `rest_days`, `opp_is_b2b`)**:
+  - Added `Database.get_schedule_context(team, opp, game_date)` computing home ice advantage, back-to-back (B2B) fatigue status, days of rest since previous match, and opponent fatigue metrics from historical and upcoming schedule tables.
+  - Automatically migrated `game_logs` table schema with `is_b2b`, `rest_days`, and `opp_is_b2b` columns, calculating and persisting fatigue metrics on all synced logs.
+  - Modulated skater projections with empirical schedule fatigue factors (-4% for skaters on B2B, +3% when facing a fatigued B2B opponent).
+- **Special Teams & Opponent Penalty Kill Modulation (`opp_pk_pct`, `opp_times_shorthanded`)**:
+  - Extended `nhl_api.get_standings` to query the official NHL penalty kill stats endpoint (`team/penaltykill`), retrieving official penalty kill percentage (`pk_pct`) and penalty frequency (`times_shorthanded_per_game`).
+  - Added schema migrations and storage for `pk_pct` and `times_shorthanded_per_game` in SQLite `standings` table.
+  - Dynamic special teams modulation in `model.compute_line_factor`: power play units (`PP1`/`PP2`) are dynamically boosted against vulnerable, penalty-prone opponents and tempered against disciplined, elite penalty killing clubs.
+- **Generalized Linear Count Models (Poisson & Tweedie GLM) in `PerformancePredictor`**:
+  - Implemented `PoissonRegressor` (log-link $\log(\mu) = X\beta$) for goals and assists to accurately model discrete, right-skewed count distributions and player scoring ceilings without negative projection artifacts.
+  - Retained Ridge Regression for continuous time-on-ice (`xTOI`) and Bayesian shrinkage for small samples ($GP < 10$).
+  - Supported flexible `model_type` selection (`"poisson"`, `"tweedie"`, `"ridge"`).
+- **Comparative Multi-Model Benchmark Suite in `--train` (`evaluate_model`)**:
+  - Point-in-time out-of-sample backtest splits compare three modeling approaches side-by-side:
+    1. 20-Game Rolling Baseline
+    2. Classic Ridge Regression
+    3. New Poisson GLM
+  - Computes and prints full evaluation table with Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and Spearman rank correlation coefficient ($r_s$) across goals, assists, shots, and TOI.
+- **109 Offline Unit Tests**: Test suite expanded from 102 to 109 tests covering schedule fatigue context, special teams modulation, GLM regression, and benchmark metrics with 100% pass rate.
+
 ## [2.4.1] - 2026-10-19
 
 ### Added

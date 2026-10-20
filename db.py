@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import time
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -113,6 +114,9 @@ class Database:
                     shots REAL NOT NULL,
                     toi TEXT NOT NULL,
                     toi_minutes REAL NOT NULL,
+                    is_b2b INTEGER DEFAULT 0,
+                    rest_days REAL DEFAULT 2.0,
+                    opp_is_b2b INTEGER DEFAULT 0,
                     UNIQUE(player_id, game_id)
                 );
 
@@ -122,6 +126,8 @@ class Database:
                     team TEXT PRIMARY KEY,
                     ga_per_game REAL NOT NULL,
                     defense_factor REAL NOT NULL,
+                    pk_pct REAL NOT NULL DEFAULT 0.80,
+                    times_shorthanded_per_game REAL NOT NULL DEFAULT 3.0,
                     updated_at REAL NOT NULL
                 );
 
@@ -323,6 +329,26 @@ class Database:
                     """)
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_lines_team ON team_lines(team)")
 
+            # Schema migration for game_logs context columns
+            cur.execute("PRAGMA table_info(game_logs)")
+            gl_cols = [row["name"] for row in cur.fetchall()]
+            if gl_cols:
+                if "is_b2b" not in gl_cols:
+                    cur.execute("ALTER TABLE game_logs ADD COLUMN is_b2b INTEGER DEFAULT 0")
+                if "rest_days" not in gl_cols:
+                    cur.execute("ALTER TABLE game_logs ADD COLUMN rest_days REAL DEFAULT 2.0")
+                if "opp_is_b2b" not in gl_cols:
+                    cur.execute("ALTER TABLE game_logs ADD COLUMN opp_is_b2b INTEGER DEFAULT 0")
+
+            # Schema migration for standings special teams columns
+            cur.execute("PRAGMA table_info(standings)")
+            s_cols = [row["name"] for row in cur.fetchall()]
+            if s_cols:
+                if "pk_pct" not in s_cols:
+                    cur.execute("ALTER TABLE standings ADD COLUMN pk_pct REAL DEFAULT 0.80")
+                if "times_shorthanded_per_game" not in s_cols:
+                    cur.execute("ALTER TABLE standings ADD COLUMN times_shorthanded_per_game REAL DEFAULT 3.0")
+
             conn.commit()
 
     # --- Standings ---
@@ -330,14 +356,22 @@ class Database:
         min_updated = time.time() - (max_age_hours * 3600)
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT team, ga_per_game, defense_factor, updated_at FROM standings WHERE updated_at > ?", (min_updated,))
+            cur.execute("""
+                SELECT team, ga_per_game, defense_factor,
+                       COALESCE(pk_pct, 0.80) as pk_pct,
+                       COALESCE(times_shorthanded_per_game, 3.0) as times_shorthanded_per_game,
+                       updated_at
+                FROM standings WHERE updated_at > ?
+            """, (min_updated,))
             rows = cur.fetchall()
             if not rows:
                 return None
             return {
                 r["team"]: {
                     "ga_per_game": float(r["ga_per_game"]),
-                    "defense_factor": float(r["defense_factor"])
+                    "defense_factor": float(r["defense_factor"]),
+                    "pk_pct": float(r["pk_pct"]),
+                    "times_shorthanded_per_game": float(r["times_shorthanded_per_game"])
                 } for r in rows
             }
 
@@ -347,13 +381,22 @@ class Database:
             cur = conn.cursor()
             for team, data in metrics.items():
                 cur.execute("""
-                    INSERT INTO standings (team, ga_per_game, defense_factor, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO standings (team, ga_per_game, defense_factor, pk_pct, times_shorthanded_per_game, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(team) DO UPDATE SET
                         ga_per_game=excluded.ga_per_game,
                         defense_factor=excluded.defense_factor,
+                        pk_pct=excluded.pk_pct,
+                        times_shorthanded_per_game=excluded.times_shorthanded_per_game,
                         updated_at=excluded.updated_at
-                """, (team, data["ga_per_game"], data["defense_factor"], now))
+                """, (
+                    team,
+                    float(data.get("ga_per_game", 3.0)),
+                    float(data.get("defense_factor", 1.0)),
+                    float(data.get("pk_pct", 0.80)),
+                    float(data.get("times_shorthanded_per_game", 3.0)),
+                    now
+                ))
             conn.commit()
 
     # --- Schedule ---
@@ -407,6 +450,69 @@ class Database:
                         now
                     ))
             conn.commit()
+
+    def get_schedule_context(self, team: str, opp: str, game_date: str) -> Dict[str, Any]:
+        """
+        Calculates schedule and fatigue context for team and opponent on game_date:
+        - is_home: whether team is at home on game_date
+        - is_b2b: 1 if team played on game_date - 1 day, else 0
+        - rest_days: days since team's last match (capped at 5.0)
+        - opp_is_b2b: 1 if opponent played on game_date - 1 day, else 0
+        - opp_rest_days: days since opponent's last match (capped at 5.0)
+        """
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT MAX(date) FROM schedule
+                WHERE (home_team = ? OR away_team = ?) AND date < ?
+            """, (team, team, game_date))
+            t_row = cur.fetchone()
+            prev_t_date = t_row[0] if t_row and t_row[0] else None
+
+            cur.execute("""
+                SELECT MAX(date) FROM schedule
+                WHERE (home_team = ? OR away_team = ?) AND date < ?
+            """, (opp, opp, game_date))
+            o_row = cur.fetchone()
+            prev_o_date = o_row[0] if o_row and o_row[0] else None
+
+            cur.execute("""
+                SELECT home_team FROM schedule
+                WHERE date = ? AND (home_team = ? OR away_team = ?)
+            """, (game_date, team, team))
+            h_row = cur.fetchone()
+            is_home = (h_row[0] == team) if h_row and h_row[0] else True
+
+        try:
+            curr_dt = datetime.strptime(game_date, "%Y-%m-%d")
+            if prev_t_date:
+                t_dt = datetime.strptime(prev_t_date, "%Y-%m-%d")
+                rest_days = min(5.0, max(0.0, float((curr_dt - t_dt).days)))
+                is_b2b = 1 if rest_days <= 1.0 else 0
+            else:
+                rest_days = 2.0
+                is_b2b = 0
+
+            if prev_o_date:
+                o_dt = datetime.strptime(prev_o_date, "%Y-%m-%d")
+                opp_rest_days = min(5.0, max(0.0, float((curr_dt - o_dt).days)))
+                opp_is_b2b = 1 if opp_rest_days <= 1.0 else 0
+            else:
+                opp_rest_days = 2.0
+                opp_is_b2b = 0
+        except Exception:
+            rest_days = 2.0
+            is_b2b = 0
+            opp_rest_days = 2.0
+            opp_is_b2b = 0
+
+        return {
+            "is_home": is_home,
+            "is_b2b": is_b2b,
+            "rest_days": rest_days,
+            "opp_is_b2b": opp_is_b2b,
+            "opp_rest_days": opp_rest_days
+        }
 
     # --- Players & Logs ---
     def get_player(self, player_id: int) -> Optional[Dict[str, Any]]:
@@ -477,7 +583,10 @@ class Database:
         with self._get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
+                SELECT game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes,
+                       COALESCE(is_b2b, 0) as is_b2b,
+                       COALESCE(rest_days, 2.0) as rest_days,
+                       COALESCE(opp_is_b2b, 0) as opp_is_b2b
                 FROM game_logs
                 WHERE player_id = ?
                 ORDER BY game_date ASC
@@ -488,12 +597,16 @@ class Database:
                 "gameDate": r["game_date"],
                 "seasonId": r["season"],
                 "homeRoadFlag": "H" if r["is_home"] else "R",
+                "is_home": 1 if r["is_home"] else 0,
                 "opponentAbbrev": r["opponent"],
                 "goals": r["goals"],
                 "assists": r["assists"],
                 "shots": r["shots"],
                 "toi": r["toi"],
-                "toi_minutes": r["toi_minutes"]
+                "toi_minutes": r["toi_minutes"],
+                "is_b2b": int(r["is_b2b"]),
+                "rest_days": float(r["rest_days"]),
+                "opp_is_b2b": int(r["opp_is_b2b"])
             } for r in rows]
 
     def has_game_logs(self, player_id: int) -> bool:
@@ -512,13 +625,15 @@ class Database:
     def save_game_logs(self, player_id: int, logs: List[Dict[str, Any]]):
         if not logs:
             return
+
+        # Sort logs chronologically to compute back-to-back and rest accurately
+        valid_logs = [g for g in logs if (g.get("gameId") or g.get("id")) and g.get("gameDate")]
+        valid_logs.sort(key=lambda x: str(x.get("gameDate", "")))
+
         rows = []
-        for g in logs:
+        for i, g in enumerate(valid_logs):
             game_id = g.get("gameId") or g.get("id")
             game_date = g.get("gameDate")
-            # Skip invalid records without gameId or date (prevents NULL integrity issues)
-            if not game_id or not game_date:
-                continue
 
             toi_str = str(g.get("toi") or "00:00")
             try:
@@ -529,18 +644,37 @@ class Database:
 
             season_id = str(g.get("seasonId") or season_from_date(game_date))
 
+            # Fatigue & schedule calculation
+            if i > 0 and valid_logs[i - 1].get("gameDate"):
+                try:
+                    d_curr = datetime.strptime(game_date, "%Y-%m-%d")
+                    d_prev = datetime.strptime(valid_logs[i - 1]["gameDate"], "%Y-%m-%d")
+                    rest = min(10.0, max(0.0, float((d_curr - d_prev).days)))
+                    is_b2b = 1 if rest <= 1.0 else 0
+                except Exception:
+                    rest = float(g.get("rest_days", 2.0))
+                    is_b2b = int(g.get("is_b2b", 0))
+            else:
+                rest = float(g.get("rest_days", 2.0))
+                is_b2b = int(g.get("is_b2b", 0))
+
+            opp_is_b2b = int(g.get("opp_is_b2b", 0))
+
             rows.append((
                 player_id,
                 game_id,
                 game_date,
                 season_id,
-                1 if g.get("homeRoadFlag") == "H" else 0,
+                1 if g.get("homeRoadFlag") == "H" or g.get("is_home") in (1, True) else 0,
                 g.get("opponentAbbrev", ""),
                 float(g.get("goals", 0)),
                 float(g.get("assists", 0)),
                 float(g.get("shots", 0)),
                 toi_str,
-                toi_min
+                toi_min,
+                is_b2b,
+                rest,
+                opp_is_b2b
             ))
 
         if not rows:
@@ -550,8 +684,10 @@ class Database:
             cur = conn.cursor()
             cur.executemany("""
                 INSERT OR IGNORE INTO game_logs (
-                    player_id, game_id, game_date, season, is_home, opponent, goals, assists, shots, toi, toi_minutes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    player_id, game_id, game_date, season, is_home, opponent,
+                    goals, assists, shots, toi, toi_minutes,
+                    is_b2b, rest_days, opp_is_b2b
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
             conn.commit()
 
