@@ -85,16 +85,59 @@ def _make_positive_definite(cov: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return eigvecs @ np.diag(eigvals) @ eigvecs.T
 
 
+def get_player_empirical_cv(p: Dict[str, Any]) -> float:
+    """
+    Returns empirical Coefficient of Variation (std / mean) for a skater based on
+    their deployment role and positional tier. Bottom-6 / depth players have
+    significantly higher volatility and lower floor than top-line stars.
+    """
+    if "empirical_cv" in p and float(p["empirical_cv"]) > 0:
+        return float(p["empirical_cv"])
+    if "std" in p and "xRRS" in p and float(p["xRRS"]) > 0:
+        return float(p["std"]) / float(p["xRRS"])
+
+    pos = "D" if str(p.get("pos", "")).upper() in ("D", "DEF") else "F"
+    ev = str(p.get("ev_line") or "").upper()
+    pp = str(p.get("pp_unit") or "").upper()
+
+    if pos == "F":
+        if ev == "L1" and pp == "PP1":
+            return 0.48  # Elite stars: reliable high TOI, lower relative dispersion
+        elif ev == "L1":
+            return 0.54
+        elif ev == "L2" and pp == "PP1":
+            return 0.55
+        elif ev == "L2":
+            return 0.62
+        elif ev == "L3":
+            return 0.75
+        elif ev == "L4":
+            return 0.95  # Bottom-six: high variance, frequent low-point games
+        return 0.65
+    else:
+        # Defensemen
+        if ev == "D1" and pp == "PP1":
+            return 0.54  # PP QB defensemen: consistent shot/assist peripheral base
+        elif ev == "D1":
+            return 0.64
+        elif ev == "D2":
+            return 0.76
+        elif ev == "D3":
+            return 0.90
+        return 0.70
+
+
 def simulate_lineup_distribution(
     lineup: List[Dict[str, Any]],
     n_sims: int = 10000,
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
 ) -> Dict[str, float]:
     """
-    Fast vectorized Monte-Carlo simulation (10,000 iterations in < 15ms) generating
-    the multivariate distribution of lineup fantasy payouts via Cholesky covariance factorization.
+    Vectorized Monte-Carlo simulation (10,000 iterations in < 15ms) generating
+    the multivariate distribution of lineup fantasy payouts via Cholesky covariance factorization
+    and a mean-preserving Gaussian copula with empirical log-normal marginals.
     Returns:
-      - mean: Expected Score (Mean)
+      - mean: Expected Score (Mean) matching projected base expectation
       - std: Standard Deviation
       - floor_25: Floor (25th percentile for Cash games)
       - median_50: Median (50th percentile)
@@ -118,21 +161,26 @@ def simulate_lineup_distribution(
         for p in lineup
     ], dtype=np.float64)
 
-    # Standard deviation proportional to expectation with baseline floor
-    stds = np.maximum(0.8, 0.52 * means)
-
     R = build_lineup_correlation_matrix(lineup)
-    D = np.diag(stds)
-    cov = D @ R @ D
-    cov = _make_positive_definite(cov)
+    R_pd = _make_positive_definite(R)
+    L = np.linalg.cholesky(R_pd)
 
-    L = np.linalg.cholesky(cov)
+    rng = np.random.default_rng(seed if seed is not None else 42)
+    Z_raw = rng.standard_normal((n_sims, n))
+    Z = Z_raw @ L.T
 
-    rng = np.random.default_rng(seed)
-    Z = rng.standard_normal((n_sims, n))
-    Y = Z @ L.T
+    # Mean-preserving log-normal marginals:
+    # E[exp(mu_log + sig_log * Z)] = exp(mu_log + 0.5 * sig_log^2) = means[i]
+    sim_base = np.zeros((n_sims, n), dtype=np.float64)
+    for i in range(n):
+        if means[i] > 0.0:
+            cv_i = get_player_empirical_cv(lineup[i])
+            sig_log = np.sqrt(np.log(1.0 + cv_i ** 2))
+            mu_log = np.log(means[i]) - 0.5 * (sig_log ** 2)
+            sim_base[:, i] = np.exp(mu_log + sig_log * Z[:, i])
+        else:
+            sim_base[:, i] = 0.0
 
-    sim_base = np.maximum(0.0, means + Y)
     sim_payout = sim_base * multipliers
     sim_totals = np.sum(sim_payout, axis=1)
 
@@ -333,6 +381,12 @@ def solve_stacked_lineup(
     best_base_score = dp_base
     best_syn_score = round(dp_base + dp_syn_diff, 2)
 
+    # Evaluate Monte-Carlo baseline for GPP selection
+    dp_sim = simulate_lineup_distribution(dp_with_stack, n_sims=3000, seed=42)
+    best_gpp_score = dp_sim.get("ceiling_90", best_syn_score)
+    best_sim_metrics = dp_sim
+    dp_floor = dp_sim.get("floor_25", 0.0)
+
     top_pair_boost = round((slots[0] + slots[1]) / 2.0, 2) if len(slots) >= 2 else (slots[0] if slots else 1.6)
     mid_boost = slots[2] if len(slots) > 2 else 1.6
 
@@ -387,6 +441,9 @@ def solve_stacked_lineup(
     top_stacks = viable_stacks[:8]
 
     if not top_stacks:
+        if best_lineup and best_sim_metrics:
+            for p in best_lineup:
+                p["_sim_metrics"] = best_sim_metrics
         return best_lineup, best_base_score, best_syn_score
 
     for i in range(len(top_stacks)):
@@ -411,10 +468,22 @@ def solve_stacked_lineup(
                 s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
                 s2_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s2_ids)
                 synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]) + (s2_assigned_sc * stack2["syn_rate"]), 2)
-                if synergy_sc >= best_syn_score:
+
+                # Monte Carlo evaluation for GPP ceiling optimization with floor guard
+                cand_sim = simulate_lineup_distribution(assigned, n_sims=3000, seed=42)
+                cand_gpp = cand_sim.get("ceiling_90", synergy_sc)
+
+                if cand_gpp > best_gpp_score and cand_sim.get("floor_25", 0.0) >= 0.70 * dp_floor:
+                    best_gpp_score = cand_gpp
                     best_syn_score = synergy_sc
                     best_base_score = base_sc
                     best_lineup = assigned
+                    best_sim_metrics = cand_sim
+                elif cand_gpp == best_gpp_score and synergy_sc >= best_syn_score:
+                    best_syn_score = synergy_sc
+                    best_base_score = base_sc
+                    best_lineup = assigned
+                    best_sim_metrics = cand_sim
 
         # Option B: Stack 1 + 3 standalone players
         remaining = [c for c in candidates if _pid(c) not in s1_ids]
@@ -426,14 +495,29 @@ def solve_stacked_lineup(
             assigned, base_sc = assign_slots(five_players, slot_boosts=slots)
             s1_assigned_sc = sum(p["score"] for p in assigned if _pid(p) in s1_ids)
             synergy_sc = round(base_sc + (s1_assigned_sc * stack1["syn_rate"]), 2)
-            if synergy_sc >= best_syn_score:
+
+            cand_sim = simulate_lineup_distribution(assigned, n_sims=3000, seed=42)
+            cand_gpp = cand_sim.get("ceiling_90", synergy_sc)
+
+            if cand_gpp > best_gpp_score and cand_sim.get("floor_25", 0.0) >= 0.70 * dp_floor:
+                best_gpp_score = cand_gpp
                 best_syn_score = synergy_sc
                 best_base_score = base_sc
                 best_lineup = assigned
+                best_sim_metrics = cand_sim
+            elif cand_gpp == best_gpp_score and synergy_sc >= best_syn_score:
+                best_syn_score = synergy_sc
+                best_base_score = base_sc
+                best_lineup = assigned
+                best_sim_metrics = cand_sim
 
     if not best_lineup:
         lineup, score = solve_optimal_lineup(candidates, slot_boosts=slots)
         return lineup, score, score
+
+    if best_lineup and best_sim_metrics:
+        for p in best_lineup:
+            p["_sim_metrics"] = best_sim_metrics
 
     return best_lineup, best_base_score, best_syn_score
 
@@ -456,10 +540,14 @@ def print_lineup_table(
         return
 
     if sim_metrics is None:
-        try:
-            sim_metrics = simulate_lineup_distribution(lineup, n_sims=10000)
-        except Exception:
-            sim_metrics = None
+        first_p = lineup[0] if lineup else {}
+        if "_sim_metrics" in first_p:
+            sim_metrics = first_p["_sim_metrics"]
+        else:
+            try:
+                sim_metrics = simulate_lineup_distribution(lineup, n_sims=10000, seed=42)
+            except Exception:
+                sim_metrics = None
 
     has_stacks = any(item.get("stack") for item in lineup)
     width = 120 if has_stacks else 109

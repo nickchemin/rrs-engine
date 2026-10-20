@@ -2,6 +2,30 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.5.1] - 2026-10-20
+
+### Fixed & Improved
+- **Monte-Carlo Mean Preservation & Empirical CV Overhaul (`optimizer.py`)**:
+  - Replaced arbitrary hardcoded $0.52 \cdot \mu$ standard deviation with deployment- and role-based Coefficient of Variation (`get_player_empirical_cv`): elite $L1/PP1$ stars have low relative dispersion ($CV \approx 0.48$), whereas bottom-6 depth grinders exhibit high relative variance ($L4$ $CV \approx 0.95$).
+  - Eliminated the truncation-induced mean distortion ($E[\max(0, X)] > \mu$) by switching to a **mean-preserving Gaussian copula with log-normal marginals**, guaranteeing $E[Y_i] = \mu_i$ identically within Monte-Carlo error.
+  - Set deterministic default `seed=42` across simulations for reproducible terminal outputs.
+  - Coupled simulation metrics directly to tournament lineup selection (`solve_stacked_lineup`), ranking candidate stacks by simulated 90th percentile ceiling (`ceiling_90`) subject to a cash floor constraint (`floor_25 >= 0.70 * dp_floor`).
+- **GLM Regularization & Bayesian Shrinkage on Small Samples (`model.py`)**:
+  - Increased regularization parameter $\alpha = 3.0$ for samples $N < 25$ games to prevent coefficient explosion with 19 collinear features.
+  - Added Bayesian shrinkage blending GLM predictions with historical/positional baseline for small samples ($N < 35$ games) via weight $w = N / (N + 15.0)$.
+  - Enforced physiological domain boundaries on single-game projections: $xG \le 1.10$, $xA \le 1.70$, $xSOG \le 6.5$, $xTOI \in [5.0, 28.0]$, and $xRRS \le 16.0$.
+  - Implemented exact fractional rank pure-NumPy Spearman rank correlation (`_numpy_spearmanr`, `_rankdata_numpy`) handling ties identically to `scipy.stats.spearmanr` when `scipy` is unavailable.
+- **Schedule Context & Cross-Batch Rest Edge Cases (`db.py`)**:
+  - `Database.get_schedule_context`: Expanded `MAX(date)` queries across `schedule` UNION `game_logs` for team and opponent, ensuring games outside the current weekly schedule window don't fall back to default rest values.
+  - `Database.save_game_logs`: Queries prior `MAX(game_date)` for the player before batch index 0, guaranteeing accurate rest days and B2B flags across incremental batch sync boundaries.
+- **Namesake OCR Disambiguation (`image_parser.py`)**:
+  - In `match_player_candidate`, duplicate players (e.g. Elias Pettersson, Sebastian Aho) missing an explicit position tag in the OCR card now log a warning and are skipped to avoid misattribution.
+  - Unified canonical booster keys using `main.normalize_booster_name`.
+- **Network Retry De-duplication (`nhl_api.py`)**:
+  - Set `HTTPAdapter(max_retries=Retry(total=0, connect=1, read=1, redirect=3, raise_on_status=False))` in `_create_session`, preventing multiplicative retry compounding ($3 \times 4 \to 3$) and leaving retry orchestration to `request_with_retry`.
+- **Comprehensive Unit Tests**:
+  - Added unit tests covering mean preservation, role-based CV differences, GLM shrinkage, physiological caps, pure NumPy Spearman correlation, schedule fallback across tables, and namesake position gating. All 137 tests passing.
+
 ## [2.5.0] - 2026-10-20
 
 ### Added

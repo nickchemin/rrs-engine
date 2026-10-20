@@ -6,13 +6,49 @@ try:
 except ImportError:
     PoissonRegressor = None
     TweedieRegressor = None
+def _rankdata_numpy(a: np.ndarray) -> np.ndarray:
+    """Computes fractional (average) ranks in pure NumPy, identical to scipy.stats.rankdata."""
+    a_arr = np.asarray(a)
+    n = len(a_arr)
+    if n == 0:
+        return np.array([], dtype=np.float64)
+    sorter = np.argsort(a_arr)
+    inv = np.empty(n, dtype=np.intp)
+    inv[sorter] = np.arange(n)
+    a_sorted = a_arr[sorter]
+    obs = np.r_[True, a_sorted[1:] != a_sorted[:-1]]
+    dense = obs.cumsum()[inv]
+    count = np.r_[np.nonzero(obs)[0], n]
+    return 0.5 * (count[dense] + count[dense - 1] + 1)
+
+
+def _numpy_spearmanr(a: Any, b: Any) -> Any:
+    """Pure NumPy Spearman rank correlation fallback when scipy is not installed."""
+    class _Result:
+        def __init__(self, stat: float):
+            self.statistic = float(stat)
+            self.correlation = float(stat)
+
+    a_arr = np.asarray(a, dtype=np.float64)
+    b_arr = np.asarray(b, dtype=np.float64)
+    if len(a_arr) < 2 or len(b_arr) < 2 or len(a_arr) != len(b_arr):
+        return _Result(0.0)
+    ra = _rankdata_numpy(a_arr)
+    rb = _rankdata_numpy(b_arr)
+    std_a = np.std(ra)
+    std_b = np.std(rb)
+    if std_a == 0.0 or std_b == 0.0:
+        return _Result(0.0)
+    c = np.corrcoef(ra, rb)[0, 1]
+    if np.isnan(c):
+        return _Result(0.0)
+    return _Result(float(c))
+
+
 try:
     from scipy.stats import spearmanr
 except ImportError:
-    def spearmanr(a, b):
-        class _Result:
-            statistic = 0.0
-        return _Result()
+    spearmanr = _numpy_spearmanr
 
 
 def parse_toi(toi_str: str) -> float:
@@ -279,26 +315,30 @@ class PerformancePredictor:
             std_X[std_X == 0.0] = 1.0
             Z = (X - mean_X) / std_X
 
+            # If sample size N < 25, use stronger regularization alpha=3.0, else 1.5
+            glm_alpha = 3.0 if len(X) < 25 else 1.5
+            ridge_toi_alpha = 25.0 if len(X) < 25 else 15.0
+
             try:
                 # Count models with log-link: goals & assists
-                g_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                g_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
                 g_model.fit(Z, y_dict["goals"])
                 self.glm_models["goals"] = (g_model, mean_X, std_X)
 
-                a_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                a_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
                 a_model.fit(Z, y_dict["assists"])
                 self.glm_models["assists"] = (a_model, mean_X, std_X)
 
                 # Shots: Poisson or Tweedie (compound Poisson)
                 if self.model_type == "tweedie" and TweedieRegressor is not None:
-                    s_model = TweedieRegressor(power=1.5, alpha=1.5, max_iter=300)
+                    s_model = TweedieRegressor(power=1.5, alpha=glm_alpha, max_iter=300)
                 else:
-                    s_model = PoissonRegressor(alpha=1.5, max_iter=300)
+                    s_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
                 s_model.fit(Z, y_dict["shots"])
                 self.glm_models["shots"] = (s_model, mean_X, std_X)
 
                 # TOI: Gaussian linear / Ridge regression
-                toi_model = RidgeRegression(alpha=15.0)
+                toi_model = RidgeRegression(alpha=ridge_toi_alpha)
                 toi_model.fit(X, y_dict["toi"])
                 self.glm_models["toi"] = toi_model
 
@@ -309,7 +349,8 @@ class PerformancePredictor:
 
         # Fallback / Classic: Multi-output Ridge regression
         y_mat = np.column_stack([y_dict[target] for target in ("goals", "assists", "shots", "toi")])
-        self.multi_model = RidgeRegression(alpha=15.0)
+        ridge_alpha = 25.0 if len(X) < 25 else 15.0
+        self.multi_model = RidgeRegression(alpha=ridge_alpha)
         self.multi_model.fit(X, y_mat)
         self.trained = True
 
@@ -437,26 +478,42 @@ class PerformancePredictor:
                 preds["shots"] = max(0.0, float(raw_preds[2]) * fatigue_mult)
                 preds["toi"] = max(0.0, float(raw_preds[3]))
 
-            if not preds:
-                gp = len(parsed)
-                k = 10.0
-                r5_g = np.mean([x["goals"] for x in last5])
-                r5_a = np.mean([x["assists"] for x in last5])
-                r5_s = np.mean([x["shots"] for x in last5])
-                r5_toi = np.mean([x["toi"] for x in last5])
+            # Baseline calculation for fallback or shrinkage blending
+            gp = len(parsed)
+            k = 10.0
+            r5_g = np.mean([x["goals"] for x in last5])
+            r5_a = np.mean([x["assists"] for x in last5])
+            r5_s = np.mean([x["shots"] for x in last5])
+            r5_toi = np.mean([x["toi"] for x in last5])
 
-                if gp < 10:
-                    adj_g = (r5_g * gp + pos_avg["goals"] * k) / (gp + k)
-                    adj_a = (r5_a * gp + pos_avg["assists"] * k) / (gp + k)
-                    adj_s = (r5_s * gp + pos_avg["shots"] * k) / (gp + k)
-                    adj_toi = (r5_toi * gp + pos_avg["toi"] * k) / (gp + k)
-                else:
-                    adj_g, adj_a, adj_s, adj_toi = r5_g, r5_a, r5_s, r5_toi
+            if gp < 10:
+                adj_g = (r5_g * gp + pos_avg["goals"] * k) / (gp + k)
+                adj_a = (r5_a * gp + pos_avg["assists"] * k) / (gp + k)
+                adj_s = (r5_s * gp + pos_avg["shots"] * k) / (gp + k)
+                adj_toi = (r5_toi * gp + pos_avg["toi"] * k) / (gp + k)
+            else:
+                adj_g, adj_a, adj_s, adj_toi = r5_g, r5_a, r5_s, r5_toi
 
-                preds["goals"] = max(0.0, adj_g * opp_def * home_boost * fatigue_mult)
-                preds["assists"] = max(0.0, adj_a * opp_def * home_boost * fatigue_mult)
-                preds["shots"] = max(0.0, adj_s * opp_def * home_boost * fatigue_mult)
-                preds["toi"] = max(5.0, adj_toi)
+            base_g = max(0.0, adj_g * opp_def * home_boost * fatigue_mult)
+            base_a = max(0.0, adj_a * opp_def * home_boost * fatigue_mult)
+            base_s = max(0.0, adj_s * opp_def * home_boost * fatigue_mult)
+            base_toi = max(5.0, adj_toi)
+
+            if preds:
+                # Small-sample Bayesian shrinkage towards baseline (N < 35 games)
+                if gp < 35:
+                    w = gp / (gp + 15.0)
+                    preds["goals"] = w * preds["goals"] + (1.0 - w) * base_g
+                    preds["assists"] = w * preds["assists"] + (1.0 - w) * base_a
+                    preds["shots"] = w * preds["shots"] + (1.0 - w) * base_s
+                    preds["toi"] = w * preds["toi"] + (1.0 - w) * base_toi
+            else:
+                preds = {
+                    "goals": base_g,
+                    "assists": base_a,
+                    "shots": base_s,
+                    "toi": base_toi
+                }
 
             if goalie_factor != 1.0:
                 preds["goals"] = max(0.0, preds["goals"] * goalie_factor)
@@ -471,6 +528,12 @@ class PerformancePredictor:
             preds["goals"] = max(0.0, preds["goals"] * g_line_mult)
             preds["assists"] = max(0.0, preds["assists"] * a_line_mult)
             preds["toi"] = max(5.0, preds["toi"] + toi_line_adj)
+
+        # Enforce physiological caps on single-game expectations
+        preds["goals"] = float(np.clip(preds["goals"], 0.0, 1.10))
+        preds["assists"] = float(np.clip(preds["assists"], 0.0, 1.70))
+        preds["shots"] = float(np.clip(preds["shots"], 0.0, 6.50))
+        preds["toi"] = float(np.clip(preds["toi"], 5.0, 28.0))
 
         is_def = position in ("D", "DEF")
         blk_rate = 0.09 if is_def else 0.04
@@ -488,6 +551,7 @@ class PerformancePredictor:
             xblk=blocked,
             is_def=is_def
         )
+        rrs_base = min(16.0, rrs_base)
 
         return {
             "xG": round(preds["goals"], 2),
@@ -534,7 +598,7 @@ def calculate_xrrs_projection(
     elif not is_def and xg < 0.10 and xa < 0.15:
         xrrs = min(0.95, xrrs)
 
-    return round(float(max(0.0, xrrs)), 2)
+    return round(float(np.clip(xrrs, 0.0, 16.0)), 2)
 
 
 def calculate_rrs_from_stats(

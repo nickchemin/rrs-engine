@@ -469,17 +469,16 @@ def match_player_candidate(
     matched_team = best_match.get("team", "")
 
     # Check for known namesakes (e.g. Elias Pettersson, Sebastian Aho)
-    from main import name_key
+    from main import name_key, normalize_booster_name
     base_key = name_key(matched_name)
 
-    # Disambiguate if duplicate or if candidate has explicit position
+    # Disambiguate if duplicate or known namesakes
     if is_duplicate or "elias pettersson" in base_key or "sebastian aho" in base_key:
-        chosen_pos = cand_pos or matched_pos
-        if chosen_pos in ("D", "DEF"):
-            pos_tag = "D"
-        else:
-            pos_tag = "C" if "elias pettersson" in base_key else ("F" if chosen_pos in ("F", "L", "R", "LW", "RW") else chosen_pos)
-        canonical_key = f"{base_key} ({pos_tag.lower()})"
+        if not cand_pos:
+            print(f"⚠️ Warning: Ambiguous OCR match '{raw_name}' for duplicate player '{matched_name}' missing position in image. Skipping to prevent misattribution.")
+            return None
+        # Disambiguate using explicit candidate position and unified normalize_booster_name
+        canonical_key = normalize_booster_name(f"{matched_name} ({cand_pos})")
     else:
         canonical_key = base_key
 

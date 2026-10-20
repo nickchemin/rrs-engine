@@ -102,9 +102,10 @@ class NHLClient:
             pool_connections=25,
             pool_maxsize=25,
             max_retries=Retry(
-                total=4,
-                backoff_factor=0.5,
-                status_forcelist=[429, 500, 502, 503, 504],
+                total=0,
+                connect=1,
+                read=1,
+                redirect=3,
                 raise_on_status=False
             )
         )

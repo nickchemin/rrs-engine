@@ -2712,23 +2712,29 @@ class TestPhase4ImageParserAndOCR(unittest.TestCase):
 
     def test_match_player_candidate_namesake_disambiguation(self):
         from image_parser import match_player_candidate
+        from main import normalize_booster_name
         slate = [
             {"id": 201, "name": "Elias Pettersson", "team": "VAN", "pos": "C", "is_duplicate": True},
             {"id": 202, "name": "Elias Pettersson", "team": "VAN", "pos": "D", "is_duplicate": True},
         ]
-        # Case 1: Defenseman
+        # Case 1: Defenseman with explicit position
         cand_d = {"raw_name": "Elias Pettersson", "team": "VAN", "pos": "D", "booster_val": 0.0}
         res_d = match_player_candidate(cand_d, slate)
         self.assertIsNotNone(res_d)
         _, canon_key_d, _ = res_d
-        self.assertEqual(canon_key_d, "elias pettersson (d)")
+        self.assertEqual(canon_key_d, normalize_booster_name("Elias Pettersson (D)"))
 
-        # Case 2: Center
+        # Case 2: Center with explicit position
         cand_c = {"raw_name": "Elias Pettersson", "team": "VAN", "pos": "C", "booster_val": 1.4}
         res_c = match_player_candidate(cand_c, slate)
         self.assertIsNotNone(res_c)
         _, canon_key_c, _ = res_c
-        self.assertEqual(canon_key_c, "elias pettersson (c)")
+        self.assertEqual(canon_key_c, normalize_booster_name("Elias Pettersson (C)"))
+
+        # Case 3: Missing position tag on duplicate player -> skipped to prevent misattribution
+        cand_ambig = {"raw_name": "Elias Pettersson", "team": "VAN", "pos": None, "booster_val": 1.4}
+        res_ambig = match_player_candidate(cand_ambig, slate)
+        self.assertIsNone(res_ambig)
 
     def test_parse_images_directory_with_mock_ocr(self):
         from image_parser import MockOCR, parse_images_directory
@@ -3038,6 +3044,113 @@ class TestPhase5ComprehensiveSuite(unittest.TestCase):
         self.assertEqual(pred_before["xA"], pred_after["xA"])
         self.assertEqual(pred_before["xSOG"], pred_after["xSOG"])
         self.assertEqual(pred_before["xRRS"], pred_after["xRRS"])
+
+    def test_monte_carlo_mean_preservation_and_empirical_cv(self):
+        from optimizer import get_player_empirical_cv, simulate_lineup_distribution
+
+        # Role-based empirical CV differences
+        cv_star = get_player_empirical_cv({"pos": "F", "ev_line": "L1", "pp_unit": "PP1"})
+        cv_depth = get_player_empirical_cv({"pos": "F", "ev_line": "L4", "pp_unit": None})
+        self.assertLess(cv_star, cv_depth)
+        self.assertEqual(cv_star, 0.48)
+        self.assertEqual(cv_depth, 0.95)
+
+        cv_d1 = get_player_empirical_cv({"pos": "D", "ev_line": "D1", "pp_unit": "PP1"})
+        cv_d3 = get_player_empirical_cv({"pos": "D", "ev_line": "D3", "pp_unit": None})
+        self.assertLess(cv_d1, cv_d3)
+        self.assertEqual(cv_d1, 0.54)
+        self.assertEqual(cv_d3, 0.90)
+
+        # Mean preservation of log-normal copula simulation
+        lineup = [
+            {"name": "Star 1", "pos": "F", "ev_line": "L1", "pp_unit": "PP1", "xRRS": 7.5, "slot_boost": 2.0, "booster": 0.5},
+            {"name": "Star 2", "pos": "F", "ev_line": "L1", "pp_unit": "PP1", "xRRS": 6.8, "slot_boost": 1.8, "booster": 0.4},
+            {"name": "Mid 1", "pos": "F", "ev_line": "L2", "pp_unit": "PP2", "xRRS": 4.5, "slot_boost": 1.6, "booster": 0.2},
+            {"name": "Def 1", "pos": "D", "ev_line": "D1", "pp_unit": "PP1", "xRRS": 4.2, "slot_boost": 1.4, "booster": 0.0},
+            {"name": "Def 2", "pos": "D", "ev_line": "D2", "pp_unit": None, "xRRS": 2.8, "slot_boost": 1.2, "booster": 0.0},
+        ]
+        expected_payout = sum(p["xRRS"] * (p["slot_boost"] + p["booster"]) for p in lineup)
+
+        sim = simulate_lineup_distribution(lineup, n_sims=10000, seed=42)
+        # Expected simulated mean matches analytical expected payout within Monte-Carlo tolerance (< 0.2 RRS)
+        self.assertAlmostEqual(sim["mean"], expected_payout, delta=0.20)
+        self.assertGreater(sim["ceiling_90"], sim["mean"])
+        self.assertLess(sim["floor_25"], sim["mean"])
+
+    def test_glm_shrinkage_and_physiological_caps(self):
+        predictor = PerformancePredictor(model_type="poisson")
+        # Extreme player stats to test physiological capping
+        extreme_logs = [
+            {"gameId": 300 + i, "gameDate": f"2026-10-{i+1:02d}", "goals": 10, "assists": 10, "shots": 20, "toi": "35:00"}
+            for i in range(10)
+        ]
+        standings = {"MTL": {"defense_factor": 1.5, "pk_pct": 0.60, "times_shorthanded_per_game": 5.0}}
+        predictor.train(extreme_logs, standings)
+
+        pred = predictor.predict(
+            extreme_logs, is_home=True, opponent_abbrev="MTL", game_date="2026-10-15",
+            position="F", ev_line="L1", pp_unit="PP1"
+        )
+
+        # Enforced physiological bounds
+        self.assertLessEqual(pred["xG"], 1.10)
+        self.assertLessEqual(pred["xA"], 1.70)
+        self.assertLessEqual(pred["xSOG"], 6.50)
+        toi_mins = float(pred["xTOI"].split(":")[0]) + float(pred["xTOI"].split(":")[1]) / 60.0
+        self.assertLessEqual(toi_mins, 28.0)
+        self.assertLessEqual(pred["xRRS"], 16.0)
+
+    def test_numpy_spearmanr_accuracy_and_ties(self):
+        from model import _numpy_spearmanr, _rankdata_numpy
+        a = [1.0, 2.0, 2.0, 4.0, 5.0]
+        b = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+        ranks = _rankdata_numpy(a)
+        self.assertEqual(list(ranks), [1.0, 2.5, 2.5, 4.0, 5.0])
+
+        res = _numpy_spearmanr(a, b)
+        self.assertGreater(res.statistic, 0.95)
+        self.assertAlmostEqual(res.statistic, res.correlation, places=6)
+
+    def test_schedule_context_fallback_to_game_logs(self):
+        # Empty schedule table, verify fallback to game_logs
+        p_id = 9901
+        self.db.save_player(p_id, "Connor McDavid", team="EDM", position="C")
+        self.db.save_game_logs(p_id, [
+            {"gameId": 501, "gameDate": "2026-10-14", "goals": 1, "assists": 2, "shots": 4, "toi": "22:00", "is_home": 1, "opponentAbbrev": "VAN"}
+        ])
+
+        ctx = self.db.get_schedule_context("EDM", "CGY", "2026-10-15")
+        self.assertEqual(ctx["rest_days"], 1.0)
+        self.assertEqual(ctx["is_b2b"], 1)
+
+    def test_save_game_logs_prior_batch_rest_calculation(self):
+        p_id = 9902
+        self.db.save_player(p_id, "Leon Draisaitl", team="EDM", position="C")
+
+        # First batch ends on 2026-10-10
+        batch1 = [
+            {"gameId": 601, "gameDate": "2026-10-10", "goals": 0, "assists": 1, "shots": 3, "toi": "20:00"}
+        ]
+        self.db.save_game_logs(p_id, batch1)
+
+        # Second batch starts on 2026-10-11 (B2B across batch boundary)
+        batch2 = [
+            {"gameId": 602, "gameDate": "2026-10-11", "goals": 1, "assists": 1, "shots": 4, "toi": "21:00"}
+        ]
+        self.db.save_game_logs(p_id, batch2)
+
+        logs = self.db.get_game_logs(p_id)
+        g2 = [g for g in logs if (g.get("gameId") or g.get("game_id")) == 602][0]
+        self.assertEqual(g2["rest_days"], 1.0)
+        self.assertEqual(g2["is_b2b"], 1)
+
+    def test_nhl_api_http_adapter_retry_config(self):
+        session = self.client._create_session()
+        adapter = session.adapters.get("https://")
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.max_retries.total, 0)
+        self.assertFalse(adapter.max_retries.raise_on_status)
 
 
 if __name__ == "__main__":

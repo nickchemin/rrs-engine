@@ -459,20 +459,42 @@ class Database:
         - rest_days: days since team's last match (capped at 5.0)
         - opp_is_b2b: 1 if opponent played on game_date - 1 day, else 0
         - opp_rest_days: days since opponent's last match (capped at 5.0)
+        Queries across both schedule and game_logs so dates outside current week window
+        do not fall back to defaults.
         """
         with self._get_connection() as conn:
             cur = conn.cursor()
+            # Team schedule context across schedule UNION game_logs
             cur.execute("""
-                SELECT MAX(date) FROM schedule
-                WHERE (home_team = ? OR away_team = ?) AND date < ?
-            """, (team, team, game_date))
+                SELECT MAX(d) FROM (
+                    SELECT date AS d FROM schedule
+                    WHERE (home_team = ? OR away_team = ?) AND date < ?
+                    UNION
+                    SELECT g.game_date AS d FROM game_logs g
+                    JOIN players p ON g.player_id = p.player_id
+                    WHERE p.team = ? AND g.game_date < ?
+                    UNION
+                    SELECT game_date AS d FROM game_logs
+                    WHERE opponent = ? AND game_date < ?
+                )
+            """, (team, team, game_date, team, game_date, team, game_date))
             t_row = cur.fetchone()
             prev_t_date = t_row[0] if t_row and t_row[0] else None
 
+            # Opponent schedule context across schedule UNION game_logs
             cur.execute("""
-                SELECT MAX(date) FROM schedule
-                WHERE (home_team = ? OR away_team = ?) AND date < ?
-            """, (opp, opp, game_date))
+                SELECT MAX(d) FROM (
+                    SELECT date AS d FROM schedule
+                    WHERE (home_team = ? OR away_team = ?) AND date < ?
+                    UNION
+                    SELECT g.game_date AS d FROM game_logs g
+                    JOIN players p ON g.player_id = p.player_id
+                    WHERE p.team = ? AND g.game_date < ?
+                    UNION
+                    SELECT game_date AS d FROM game_logs
+                    WHERE opponent = ? AND game_date < ?
+                )
+            """, (opp, opp, game_date, opp, game_date, opp, game_date))
             o_row = cur.fetchone()
             prev_o_date = o_row[0] if o_row and o_row[0] else None
 
@@ -481,7 +503,17 @@ class Database:
                 WHERE date = ? AND (home_team = ? OR away_team = ?)
             """, (game_date, team, team))
             h_row = cur.fetchone()
-            is_home = (h_row[0] == team) if h_row and h_row[0] else True
+            if h_row and h_row[0]:
+                is_home = (h_row[0] == team)
+            else:
+                cur.execute("""
+                    SELECT is_home FROM game_logs g
+                    JOIN players p ON g.player_id = p.player_id
+                    WHERE p.team = ? AND g.game_date = ?
+                    LIMIT 1
+                """, (team, game_date))
+                gl_h = cur.fetchone()
+                is_home = bool(gl_h[0]) if gl_h is not None else True
 
         try:
             curr_dt = datetime.strptime(game_date, "%Y-%m-%d")
@@ -630,6 +662,20 @@ class Database:
         valid_logs = [g for g in logs if (g.get("gameId") or g.get("id")) and g.get("gameDate")]
         valid_logs.sort(key=lambda x: str(x.get("gameDate", "")))
 
+        # Look up most recent prior game in DB before this batch's earliest game
+        prior_game_date = None
+        if valid_logs and valid_logs[0].get("gameDate"):
+            first_game_date = valid_logs[0]["gameDate"]
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT MAX(game_date) FROM game_logs WHERE player_id = ? AND game_date < ?",
+                    (player_id, first_game_date)
+                )
+                r = cur.fetchone()
+                if r and r[0]:
+                    prior_game_date = r[0]
+
         rows = []
         for i, g in enumerate(valid_logs):
             game_id = g.get("gameId") or g.get("id")
@@ -644,11 +690,18 @@ class Database:
 
             season_id = str(g.get("seasonId") or season_from_date(game_date))
 
-            # Fatigue & schedule calculation
+            # Fatigue & schedule calculation (across batch items and DB historical records)
             if i > 0 and valid_logs[i - 1].get("gameDate"):
+                prev_date_str = valid_logs[i - 1]["gameDate"]
+            elif i == 0 and prior_game_date:
+                prev_date_str = prior_game_date
+            else:
+                prev_date_str = None
+
+            if prev_date_str:
                 try:
                     d_curr = datetime.strptime(game_date, "%Y-%m-%d")
-                    d_prev = datetime.strptime(valid_logs[i - 1]["gameDate"], "%Y-%m-%d")
+                    d_prev = datetime.strptime(prev_date_str, "%Y-%m-%d")
                     rest = min(10.0, max(0.0, float((d_curr - d_prev).days)))
                     is_b2b = 1 if rest <= 1.0 else 0
                 except Exception:
