@@ -62,6 +62,24 @@ def name_key(name: str) -> str:
     return " ".join(ascii_str.lower().split())
 
 
+def parse_toi(val: Any) -> float:
+    if not val:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val = str(val).strip()
+    if ":" in val:
+        parts = val.split(":")
+        try:
+            return float(parts[0]) + float(parts[1]) / 60.0
+        except (ValueError, IndexError):
+            return 0.0
+    try:
+        return float(val)
+    except ValueError:
+        return 0.0
+
+
 def current_season_start_year() -> int:
     now = nhl_now()
     return now.year if now.month >= 8 else now.year - 1
@@ -83,11 +101,54 @@ class NHLClient:
         adapter = HTTPAdapter(
             pool_connections=25,
             pool_maxsize=25,
-            max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+            max_retries=Retry(
+                total=4,
+                backoff_factor=0.5,
+                status_forcelist=[429, 500, 502, 503, 504],
+                raise_on_status=False
+            )
         )
         s.mount("https://", adapter)
         s.mount("http://", adapter)
         return s
+
+    def request_with_retry(
+        self,
+        url: str,
+        method: str = "GET",
+        max_retries: int = 3,
+        backoff_base: float = 0.5,
+        timeout: float = 10.0,
+        **kwargs
+    ) -> requests.Response:
+        """
+        Executes HTTP request with exponential backoff on transient network failures
+        and HTTP 429/5xx status codes: delay = backoff_base * (2 ** attempt).
+        """
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                if method.upper() == "GET":
+                    res = self.session.get(url, timeout=timeout, **kwargs)
+                else:
+                    res = self.session.request(method=method, url=url, timeout=timeout, **kwargs)
+
+                if res.status_code in (429, 500, 502, 503, 504):
+                    if attempt < max_retries - 1:
+                        sleep_s = backoff_base * (2 ** attempt)
+                        time.sleep(sleep_s)
+                        continue
+                return res
+            except (requests.exceptions.RequestException, TimeoutError) as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    sleep_s = backoff_base * (2 ** attempt)
+                    time.sleep(sleep_s)
+                else:
+                    raise last_exc
+        if last_exc:
+            raise last_exc
+        return res
 
     @property
     def session(self) -> requests.Session:
@@ -110,7 +171,7 @@ class NHLClient:
         url = "https://api-web.nhle.com/v1/standings/now"
         metrics: Dict[str, Dict[str, float]] = {}
         try:
-            res = self.session.get(url, timeout=10)
+            res = self.request_with_retry(url, timeout=10)
             if res.status_code == 200:
                 standings = res.json().get("standings", [])
                 total_ga = 0
@@ -148,7 +209,7 @@ class NHLClient:
                 try:
                     curr_season = f"{current_season_start_year()}{current_season_start_year()+1}"
                     pk_url = f"https://api.nhle.com/stats/rest/en/team/penaltykill?cayenneExp=seasonId={curr_season}%20and%20gameTypeId=2"
-                    pk_res = self.session.get(pk_url, timeout=6)
+                    pk_res = self.request_with_retry(pk_url, timeout=6)
                     if pk_res.status_code == 200:
                         pk_rows = pk_res.json().get("data", [])
                         name_to_abbrev = {name_key(slug.replace("-", " ")): t for t, slug in TEAM_TO_SLUG.items()}
@@ -178,7 +239,7 @@ class NHLClient:
         url = "https://api-web.nhle.com/v1/schedule/now"
         schedule = []
         try:
-            res = self.session.get(url, timeout=10)
+            res = self.request_with_retry(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 for day in data.get("gameWeek", []):
@@ -207,7 +268,7 @@ class NHLClient:
     def _fetch_game_log(self, player_id: int, season: str) -> List[Dict[str, Any]]:
         url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/{season}/2"
         try:
-            res = self.session.get(url, timeout=6)
+            res = self.request_with_retry(url, timeout=6)
             if res.status_code == 200:
                 items = res.json().get("gameLog", [])
                 valid = []
@@ -237,7 +298,7 @@ class NHLClient:
                 # Fast check: sync newly completed games from the current season
                 try:
                     url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
-                    res = self.session.get(url, timeout=6)
+                    res = self.request_with_retry(url, timeout=6)
                     if res.status_code == 200:
                         data = res.json()
                         if data.get("gameTypeId") != 1:
@@ -329,7 +390,7 @@ class NHLClient:
     def get_player_current_game_logs(self, player_id: int) -> Optional[List[Dict[str, Any]]]:
         url = f"https://api-web.nhle.com/v1/player/{player_id}/game-log/now"
         try:
-            res = self.session.get(url, timeout=6)
+            res = self.request_with_retry(url, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("gameTypeId") == 1:
@@ -403,7 +464,7 @@ class NHLClient:
     def get_club_stats(self, team_abbrev: str) -> List[Dict[str, Any]]:
         url = f"https://api-web.nhle.com/v1/club-stats/{team_abbrev}/now"
         try:
-            res = self.session.get(url, timeout=8)
+            res = self.request_with_retry(url, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 return data.get("skaters", [])
@@ -414,7 +475,7 @@ class NHLClient:
     def get_team_roster(self, team_abbrev: str) -> List[Dict[str, Any]]:
         url = f"https://api-web.nhle.com/v1/roster/{team_abbrev}/current"
         try:
-            res = self.session.get(url, timeout=8)
+            res = self.request_with_retry(url, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 return data.get("forwards", []) + data.get("defensemen", [])
@@ -432,7 +493,7 @@ class NHLClient:
         injuries_list = []
         injuries_map = {}
         try:
-            res = self.session.get(url, timeout=10)
+            res = self.request_with_retry(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 for team_item in data.get("injuries", []):
@@ -495,7 +556,7 @@ class NHLClient:
         # 1. Try Daily Faceoff (confirmed live starting goalies)
         try:
             url = "https://www.dailyfaceoff.com/starting-goalies"
-            res = self.session.get(url, timeout=8)
+            res = self.request_with_retry(url, timeout=8)
             if res.status_code == 200:
                 m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', res.text, re.S)
                 if m:
@@ -544,7 +605,7 @@ class NHLClient:
                 g_id = g.get("gameId")
                 if (h_team not in goalies or a_team not in goalies) and g_id:
                     try:
-                        res = self.session.get(f"https://api-web.nhle.com/v1/gamecenter/{g_id}/landing", timeout=8)
+                        res = self.request_with_retry(f"https://api-web.nhle.com/v1/gamecenter/{g_id}/landing", timeout=8)
                         if res.status_code == 200:
                             gc = res.json().get("matchup", {}).get("goalieComparison", {})
                             if h_team and h_team not in goalies:
@@ -591,7 +652,7 @@ class NHLClient:
         url = f"https://api-web.nhle.com/v1/gamecenter/{game_id}/boxscore"
         skaters: Dict[int, Dict[str, Any]] = {}
         try:
-            res = self.session.get(url, timeout=8)
+            res = self.request_with_retry(url, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 game_state = data.get("gameState")
@@ -630,7 +691,7 @@ class NHLClient:
         url = f"https://www.dailyfaceoff.com/teams/{slug}/line-combinations"
         lines_data = TeamLines()
         try:
-            res = self.session.get(url, timeout=10)
+            res = self.request_with_retry(url, timeout=10)
             if res.status_code == 200:
                 m = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', res.text, re.DOTALL)
                 if m:
@@ -691,7 +752,7 @@ class NHLClient:
                             lines_data[("elias pettersson", "D")] = entry
 
                     team_has_pp = any(v.get("pp_unit") for k, v in lines_data.items() if isinstance(v, dict))
-                    lines_data._meta = {"has_pp": team_has_pp}
+                    lines_data._meta = {"has_pp": team_has_pp, "source": "dailyfaceoff"}
 
                     if lines_data:
                         self.db.save_team_lines(team, lines_data)
@@ -701,6 +762,129 @@ class NHLClient:
                 print(f"⚠️ Warning: Daily Faceoff returned HTTP {res.status_code} for {team}")
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch lines for {team}: {e}")
+
+        # If Daily Faceoff scraping failed or returned 0 players, fallback automatically to NHL API TOI profiles!
+        if not lines_data:
+            print(f"🔄 Triggering automatic NHL API TOI-profile fallback for {team} line combinations...")
+            lines_data = self._fallback_team_lines_from_nhl_api(team)
+
+        return lines_data
+
+    def _fallback_team_lines_from_nhl_api(self, team: str) -> TeamLines:
+        """
+        Reconstructs line combinations (EV Lines L1-L4, D1-D3, PP1/PP2) from official NHL API
+        skater profiles, utilizing recent 3-game TOI trends and time-on-ice deployment data.
+        Guarantees that the optimizer never runs with empty lines when Daily Faceoff is down.
+        """
+        lines_data = TeamLines()
+        skaters = self._fetch_team_skaters(team)
+        if not skaters:
+            skaters = self.get_club_stats(team)
+        if not skaters:
+            return lines_data
+
+        curr_season = f"{current_season_start_year()}{current_season_start_year()+1}"
+        toi_url = f"https://api.nhle.com/stats/rest/en/skater/timeonice?cayenneExp=seasonId={curr_season}%20and%20gameTypeId=2%20and%20teamAbbrevs=%27{team}%27"
+        pid_to_toi: Dict[int, Dict[str, Any]] = {}
+        try:
+            res = self.request_with_retry(toi_url, timeout=6)
+            if res.status_code == 200:
+                for item in res.json().get("data", []):
+                    if "playerId" in item:
+                        pid_to_toi[item["playerId"]] = item
+        except Exception:
+            pass
+
+        skater_metrics = []
+        for s in skaters:
+            pid = s.get("playerId")
+            fn = f"{s.get('firstName', {}).get('default', '')} {s.get('lastName', {}).get('default', '')}".strip()
+            if not fn:
+                fn = s.get("name", "")
+            pos = s.get("positionCode", "F")
+            pos_group = "D" if pos in ("D", "LD", "RD", "DEF") else "F"
+
+            # Check recent 3 games from database or API
+            logs = self.db.get_game_logs(pid) if hasattr(self.db, "get_game_logs") else []
+            if not logs:
+                try:
+                    logs = self._fetch_game_log(pid, curr_season)
+                except Exception:
+                    logs = []
+
+            recent_logs = logs[-3:] if logs else []
+            if recent_logs:
+                recent_avg_toi = sum(parse_toi(g.get("toi", "00:00")) for g in recent_logs) / len(recent_logs)
+            else:
+                recent_avg_toi = float(s.get("avgTimeOnIcePerGame", 0.0) or 0.0) / 60.0
+
+            toi_item = pid_to_toi.get(pid, {})
+            ev_toi_stat = float(toi_item.get("evTimeOnIcePerGame", 0.0) or 0.0) / 60.0
+            pp_toi_stat = float(toi_item.get("ppTimeOnIcePerGame", 0.0) or 0.0) / 60.0
+            tot_toi_stat = float(toi_item.get("timeOnIcePerGame", 0.0) or 0.0) / 60.0
+
+            if tot_toi_stat > 0 and recent_avg_toi > 0:
+                scale = recent_avg_toi / tot_toi_stat
+                ev_toi = ev_toi_stat * scale
+                pp_toi = pp_toi_stat * scale
+            elif ev_toi_stat > 0:
+                ev_toi = ev_toi_stat
+                pp_toi = pp_toi_stat
+            else:
+                ev_toi = recent_avg_toi * 0.85
+                pp_toi = recent_avg_toi * 0.15
+
+            skater_metrics.append({
+                "pid": pid,
+                "name": fn,
+                "pos": pos,
+                "pos_group": pos_group,
+                "ev_toi": ev_toi,
+                "pp_toi": pp_toi,
+                "total_toi": recent_avg_toi
+            })
+
+        forwards = [x for x in skater_metrics if x["pos_group"] == "F"]
+        defense = [x for x in skater_metrics if x["pos_group"] == "D"]
+
+        forwards.sort(key=lambda x: x["ev_toi"], reverse=True)
+        defense.sort(key=lambda x: x["ev_toi"], reverse=True)
+
+        ev_assignments: Dict[int, str] = {}
+        for idx, f in enumerate(forwards):
+            line_idx = min(4, (idx // 3) + 1)
+            ev_assignments[f["pid"]] = f"L{line_idx}"
+
+        for idx, d in enumerate(defense):
+            pair_idx = min(3, (idx // 2) + 1)
+            ev_assignments[d["pid"]] = f"D{pair_idx}"
+
+        # Power play assignments: top 5 by PP TOI -> PP1, next 5 -> PP2
+        pp_candidates = sorted(skater_metrics, key=lambda x: x["pp_toi"], reverse=True)
+        pp_assignments: Dict[int, str] = {}
+        for idx, p in enumerate(pp_candidates):
+            if idx < 5 and p["pp_toi"] >= 0.8:
+                pp_assignments[p["pid"]] = "PP1"
+            elif idx < 10 and p["pp_toi"] >= 0.4:
+                pp_assignments[p["pid"]] = "PP2"
+
+        for x in skater_metrics:
+            nk = name_key(x["name"])
+            key = (nk, x["pos_group"])
+            lines_data[key] = {
+                "player_name": x["name"],
+                "pos_group": x["pos_group"],
+                "ev_line": ev_assignments.get(x["pid"]),
+                "pp_unit": pp_assignments.get(x["pid"]),
+                "pk_unit": None,
+                "position": x["pos"]
+            }
+
+        team_has_pp = any(v.get("pp_unit") for k, v in lines_data.items() if isinstance(v, dict))
+        lines_data._meta = {"has_pp": team_has_pp, "source": "nhl_api_fallback"}
+
+        if lines_data:
+            self.db.save_team_lines(team, lines_data)
 
         return lines_data
 

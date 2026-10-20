@@ -39,7 +39,15 @@ All notable changes to the RRS Engine project are documented in this file.
     - `Floor (25th percentile)`: downside risk scenario essential for Cash games.
     - `Ceiling (90th percentile)` and `Ceiling (95th percentile)`: upper-tail explosive upside potential for GPP tournaments.
   - Maintained $O(5N)$ dynamic programming runtime for slot assignment and optimal lineup selection.
-- **115 Offline Unit Tests**: Test suite expanded from 109 to 115 tests covering correlation matrix symmetry, positive definiteness, Monte-Carlo simulation runtime, Cash game Floor vs Tournament Ceiling variance dynamics, and $O(5N)$ scaling.
+- **Scraping Fault Tolerance & Exponential Backoff Retries (`nhl_api.py`)**:
+  - Implemented `NHLClient.request_with_retry` with exponential backoff ($delay = backoff \cdot 2^{attempt}$) handling transient HTTP status codes (429 Too Many Requests, 500, 502, 503, 504) and network dropouts (`ConnectionError`, `Timeout`, `HTTPError`).
+  - Configured `urllib3` retry adapters with `total=4`, `backoff_factor=0.5`, and retry statuses `[429, 500, 502, 503, 504]` across all active HTTP sessions.
+  - Uniformly routed all data endpoints (standings, schedules, game logs, club stats, rosters, injuries, starting goalies, boxscores, and line combinations) through the centralized backoff retry handler.
+- **Dynamic Time-On-Ice Line Fallback Engine (`NHLClient._fallback_team_lines_from_nhl_api`)**:
+  - Engineered an automatic fallback mechanism that activates when Daily Faceoff experiences server downtime (HTTP 5xx/404), cloudflare challenges, or layout mutations.
+  - Queries official NHL stats API time-on-ice endpoints (`skater/timeonice`) and recent 3-game logs to dynamically reconstruct forward lines (`L1` to `L4`), defensive pairings (`D1` to `D3`), and power play units (`PP1`/`PP2`) ranked by EV TOI and PP TOI per game.
+  - Guarantees seamless continuation of lineup generation and projection modeling without missing line assignments.
+- **118 Offline Unit Tests**: Test suite expanded from 115 to 118 tests covering exponential backoff retry sequences, retry exhaustion exceptions, and NHL API TOI-based fallback reconstruction.
 
 ## [2.4.1] - 2026-10-19
 

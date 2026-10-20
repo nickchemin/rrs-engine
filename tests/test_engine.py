@@ -4,6 +4,7 @@ import sys
 import unittest
 import tempfile
 import argparse
+import requests
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
 import time
@@ -2506,6 +2507,108 @@ class TestPhase2MonteCarloOptimizer(unittest.TestCase):
         self.assertEqual(len(lineup), 5)
         self.assertGreater(score, 0.0)
         self.assertLess(elapsed, 0.05)
+
+
+class TestPhase3ScrapingAndFallback(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test_phase3.db")
+        self.db = Database(self.db_path)
+        self.client = NHLClient(self.db)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    def test_request_with_retry_exponential_backoff_on_transient_error(self):
+        resp_500_1 = MagicMock(status_code=500)
+        resp_500_2 = MagicMock(status_code=502)
+        resp_200 = MagicMock(status_code=200, text="OK")
+
+        mock_req = MagicMock(side_effect=[resp_500_1, resp_500_2, resp_200])
+        with patch.object(self.client.session, "get", mock_req), patch("time.sleep") as mock_sleep:
+            res = self.client.request_with_retry("https://api-test.com/endpoint", max_retries=3, backoff_base=0.1)
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(mock_req.call_count, 3)
+            self.assertEqual(mock_sleep.call_count, 2)
+            mock_sleep.assert_any_call(0.1)
+            mock_sleep.assert_any_call(0.2)
+
+    def test_request_with_retry_raises_after_max_retries(self):
+        mock_req = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection dropped"))
+        with patch.object(self.client.session, "get", mock_req), patch("time.sleep"):
+            with self.assertRaises(requests.exceptions.ConnectionError):
+                self.client.request_with_retry("https://api-test.com/fail", max_retries=3, backoff_base=0.01)
+
+    def test_team_lines_dfo_failure_triggers_nhl_api_toi_fallback(self):
+        dfo_resp = MagicMock(status_code=500)
+
+        sample_skaters = [
+            {"playerId": 101, "firstName": {"default": "Connor"}, "lastName": {"default": "McDavid"}, "positionCode": "C"},
+            {"playerId": 102, "firstName": {"default": "Leon"}, "lastName": {"default": "Draisaitl"}, "positionCode": "C"},
+            {"playerId": 103, "firstName": {"default": "Vasily"}, "lastName": {"default": "Podkolzin"}, "positionCode": "R"},
+            {"playerId": 104, "firstName": {"default": "Zach"}, "lastName": {"default": "Hyman"}, "positionCode": "L"},
+            {"playerId": 105, "firstName": {"default": "Kasperi"}, "lastName": {"default": "Kapanen"}, "positionCode": "R"},
+            {"playerId": 106, "firstName": {"default": "Mathieu"}, "lastName": {"default": "Joseph"}, "positionCode": "R"},
+            {"playerId": 201, "firstName": {"default": "Evan"}, "lastName": {"default": "Bouchard"}, "positionCode": "D"},
+            {"playerId": 202, "firstName": {"default": "Ryan"}, "lastName": {"default": "Shea"}, "positionCode": "D"},
+            {"playerId": 203, "firstName": {"default": "Connor"}, "lastName": {"default": "Murphy"}, "positionCode": "D"},
+            {"playerId": 204, "firstName": {"default": "Mattias"}, "lastName": {"default": "Ekholm"}, "positionCode": "D"},
+        ]
+
+        toi_rows = [
+            {"playerId": 101, "evTimeOnIcePerGame": 1100.0, "ppTimeOnIcePerGame": 210.0, "timeOnIcePerGame": 1310.0},
+            {"playerId": 102, "evTimeOnIcePerGame": 1060.0, "ppTimeOnIcePerGame": 200.0, "timeOnIcePerGame": 1260.0},
+            {"playerId": 103, "evTimeOnIcePerGame": 980.0, "ppTimeOnIcePerGame": 190.0, "timeOnIcePerGame": 1170.0},
+            {"playerId": 104, "evTimeOnIcePerGame": 920.0, "ppTimeOnIcePerGame": 150.0, "timeOnIcePerGame": 1070.0},
+            {"playerId": 105, "evTimeOnIcePerGame": 800.0, "ppTimeOnIcePerGame": 120.0, "timeOnIcePerGame": 920.0},
+            {"playerId": 106, "evTimeOnIcePerGame": 780.0, "ppTimeOnIcePerGame": 30.0, "timeOnIcePerGame": 810.0},
+            {"playerId": 201, "evTimeOnIcePerGame": 1250.0, "ppTimeOnIcePerGame": 205.0, "timeOnIcePerGame": 1455.0},
+            {"playerId": 202, "evTimeOnIcePerGame": 1180.0, "ppTimeOnIcePerGame": 80.0, "timeOnIcePerGame": 1260.0},
+            {"playerId": 203, "evTimeOnIcePerGame": 1150.0, "ppTimeOnIcePerGame": 10.0, "timeOnIcePerGame": 1160.0},
+            {"playerId": 204, "evTimeOnIcePerGame": 1120.0, "ppTimeOnIcePerGame": 20.0, "timeOnIcePerGame": 1140.0},
+        ]
+        toi_resp = MagicMock(status_code=200)
+        toi_resp.json.return_value = {"data": toi_rows}
+
+        def fake_get(url, *args, **kwargs):
+            if "dailyfaceoff.com" in url:
+                return dfo_resp
+            elif "timeonice" in url:
+                return toi_resp
+            return MagicMock(status_code=404)
+
+        with patch.object(self.client, "request_with_retry", side_effect=fake_get), \
+             patch.object(self.client, "_fetch_team_skaters", return_value=sample_skaters):
+            lines = self.client.get_team_lines("EDM", force=True)
+
+        self.assertIsNotNone(lines)
+        self.assertEqual(lines._meta.get("source"), "nhl_api_fallback")
+        self.assertTrue(lines._meta.get("has_pp"))
+
+        mcdavid = lines.get(("connor mcdavid", "F"))
+        self.assertIsNotNone(mcdavid)
+        self.assertEqual(mcdavid["ev_line"], "L1")
+        self.assertEqual(mcdavid["pp_unit"], "PP1")
+
+        draisaitl = lines.get(("leon draisaitl", "F"))
+        self.assertEqual(draisaitl["ev_line"], "L1")
+        self.assertEqual(draisaitl["pp_unit"], "PP1")
+
+        hyman = lines.get(("zach hyman", "F"))
+        self.assertEqual(hyman["ev_line"], "L2")
+
+        bouchard = lines.get(("evan bouchard", "D"))
+        self.assertEqual(bouchard["ev_line"], "D1")
+        self.assertEqual(bouchard["pp_unit"], "PP1")
+
+        murphy = lines.get(("connor murphy", "D"))
+        self.assertEqual(murphy["ev_line"], "D2")
+
+        saved = self.db.get_team_lines("EDM")
+        self.assertEqual(saved.get(("connor mcdavid", "F"))["ev_line"], "L1")
 
 
 if __name__ == "__main__":
