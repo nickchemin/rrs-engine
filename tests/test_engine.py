@@ -2537,9 +2537,26 @@ class TestPhase3ScrapingAndFallback(unittest.TestCase):
             res = self.client.request_with_retry("https://api-test.com/endpoint", max_retries=3, backoff_base=0.1)
             self.assertEqual(res.status_code, 200)
             self.assertEqual(mock_req.call_count, 3)
-            self.assertEqual(mock_sleep.call_count, 2)
-            mock_sleep.assert_any_call(0.1)
-            mock_sleep.assert_any_call(0.2)
+            delays = [call.args[0] for call in mock_sleep.call_args_list]
+            self.assertEqual(len(delays), 2)
+            self.assertAlmostEqual(delays[0], 0.1, delta=0.03)
+            self.assertAlmostEqual(delays[1], 0.2, delta=0.06)
+
+    def test_request_with_retry_raises_on_exhausted_rate_limit(self):
+        mock_req = MagicMock(return_value=MagicMock(status_code=429, headers={}))
+        with patch.object(self.client.session, "get", mock_req), patch("time.sleep"):
+            with self.assertRaises(requests.exceptions.HTTPError):
+                self.client.request_with_retry("https://api-test.com/limited", max_retries=2, backoff_base=0.01)
+        self.assertEqual(mock_req.call_count, 2)
+
+    def test_request_with_retry_honors_retry_after(self):
+        resp_429 = MagicMock(status_code=429, headers={"Retry-After": "2"})
+        resp_200 = MagicMock(status_code=200, text="OK")
+        mock_req = MagicMock(side_effect=[resp_429, resp_200])
+        with patch.object(self.client.session, "get", mock_req), patch("time.sleep") as mock_sleep:
+            res = self.client.request_with_retry("https://api-test.com/limited", max_retries=2, backoff_base=0.01)
+        self.assertEqual(res.status_code, 200)
+        mock_sleep.assert_called_once_with(2.0)
 
     def test_request_with_retry_raises_after_max_retries(self):
         mock_req = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection dropped"))

@@ -1,10 +1,12 @@
 import requests
 import json
+import random
 import re
 import os
 import threading
 import unicodedata
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone, timedelta, tzinfo
 from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -113,6 +115,19 @@ class NHLClient:
         s.mount("http://", adapter)
         return s
 
+    def _retry_delay(self, attempt: int, backoff_base: float, response: Any = None) -> float:
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if isinstance(headers, Mapping):
+                retry_after = headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        return min(30.0, max(0.0, float(retry_after)))
+                    except (TypeError, ValueError):
+                        pass
+        delay = backoff_base * (2 ** attempt)
+        return delay + random.uniform(0.0, delay * 0.25)
+
     def request_with_retry(
         self,
         url: str,
@@ -123,9 +138,13 @@ class NHLClient:
         **kwargs
     ) -> requests.Response:
         """
-        Executes HTTP request with exponential backoff on transient network failures
-        and HTTP 429/5xx status codes: delay = backoff_base * (2 ** attempt).
+        Executes an HTTP request with exponential backoff and jitter on transient
+        network failures and retryable HTTP status codes.
+        Raises requests.HTTPError when retryable status codes persist.
         """
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
+
         last_exc = None
         for attempt in range(max_retries):
             try:
@@ -136,20 +155,22 @@ class NHLClient:
 
                 if res.status_code in (429, 500, 502, 503, 504):
                     if attempt < max_retries - 1:
-                        sleep_s = backoff_base * (2 ** attempt)
-                        time.sleep(sleep_s)
+                        time.sleep(self._retry_delay(attempt, backoff_base, res))
                         continue
+                    raise requests.HTTPError(
+                        f"HTTP {res.status_code} after {max_retries} attempts: {url}",
+                        response=res,
+                    )
                 return res
             except (requests.exceptions.RequestException, TimeoutError) as e:
                 last_exc = e
                 if attempt < max_retries - 1:
-                    sleep_s = backoff_base * (2 ** attempt)
-                    time.sleep(sleep_s)
+                    time.sleep(self._retry_delay(attempt, backoff_base))
                 else:
-                    raise last_exc
+                    raise
         if last_exc:
             raise last_exc
-        return res
+        raise RuntimeError("request failed without a response")
 
     @property
     def session(self) -> requests.Session:
