@@ -624,7 +624,24 @@ class Database:
                 ORDER BY game_date ASC
             """, (player_id,))
             rows = cur.fetchall()
-            return [{
+
+        logs: List[Dict[str, Any]] = []
+        previous_date: Optional[str] = None
+        for r in rows:
+            rest_days = float(r["rest_days"])
+            is_b2b = int(r["is_b2b"])
+            if previous_date and r["game_date"]:
+                try:
+                    gap = (
+                        datetime.strptime(r["game_date"], "%Y-%m-%d")
+                        - datetime.strptime(previous_date, "%Y-%m-%d")
+                    ).days
+                    rest_days = min(10.0, max(0.0, float(gap)))
+                    is_b2b = 1 if rest_days <= 1.0 else 0
+                except ValueError:
+                    pass
+
+            logs.append({
                 "gameId": r["game_id"],
                 "gameDate": r["game_date"],
                 "seasonId": r["season"],
@@ -636,10 +653,12 @@ class Database:
                 "shots": r["shots"],
                 "toi": r["toi"],
                 "toi_minutes": r["toi_minutes"],
-                "is_b2b": int(r["is_b2b"]),
-                "rest_days": float(r["rest_days"]),
+                "is_b2b": is_b2b,
+                "rest_days": rest_days,
                 "opp_is_b2b": int(r["opp_is_b2b"])
-            } for r in rows]
+            })
+            previous_date = r["game_date"]
+        return logs
 
     def has_game_logs(self, player_id: int) -> bool:
         with self._get_connection() as conn:

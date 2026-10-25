@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import shutil
+import sqlite3
 import unittest
 import tempfile
 import argparse
@@ -3222,6 +3223,25 @@ class TestDatabasePersistence(unittest.TestCase):
         self.assertEqual(logs[0]["goals"], 3.0)
         self.assertEqual(logs[0]["assists"], 1.0)
         self.assertEqual(logs[0]["toi"], "18:30")
+
+    def test_get_game_logs_derives_rest_days_from_dates(self):
+        self.db.save_player(7002, "Test Skater Two", team="COL", position="C")
+        self.db.save_game_logs(7002, [
+            {"gameId": 9002, "gameDate": "2026-10-10", "goals": 0, "assists": 0, "shots": 1, "toi": "12:00"},
+            {"gameId": 9003, "gameDate": "2026-10-11", "goals": 0, "assists": 0, "shots": 1, "toi": "12:00"},
+        ])
+
+        conn = sqlite3.connect(self.db.db_path)
+        try:
+            conn.execute("UPDATE game_logs SET is_b2b = 0, rest_days = 2.0 WHERE player_id = ?", (7002,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        logs = self.db.get_game_logs(7002)
+        self.assertEqual(len(logs), 2)
+        self.assertEqual(logs[1]["rest_days"], 1.0)
+        self.assertEqual(logs[1]["is_b2b"], 1)
 
 
 if __name__ == "__main__":
