@@ -31,6 +31,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Lint
+        run: ruff check .
+
       - name: Run test suite
         run: |
           python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer -m unittest discover -s tests -v
