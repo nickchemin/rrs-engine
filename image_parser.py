@@ -11,6 +11,7 @@ import sys
 import re
 import shutil
 import unicodedata
+from collections import Counter
 from typing import List, Dict, Tuple, Optional, Any, Set, Union, Callable
 
 try:
@@ -417,7 +418,7 @@ def compute_name_similarity(name_a: str, name_b: str) -> float:
 def match_player_candidate(
     candidate: Dict[str, Any],
     known_players: List[Dict[str, Any]],
-    threshold: float = 72.0
+    threshold: float = 85.0
 ) -> Optional[Tuple[Dict[str, Any], str, float]]:
     """
     Fuzzy matches a parsed candidate against known slate players.
@@ -425,9 +426,14 @@ def match_player_candidate(
         (matched_player_dict, canonical_booster_key, confidence_score)
         or None if no confident match was found.
     """
+    from main import name_key, normalize_booster_name
+
     raw_name = candidate.get("raw_name", "")
     cand_team = (candidate.get("team") or "").upper()
     cand_pos = (candidate.get("pos") or "").upper()
+
+    name_counts = Counter(normalize_text_token(p.get("name", "")) for p in known_players)
+    is_duplicate_name = name_counts[normalize_text_token(raw_name)] > 1
 
     best_match: Optional[Dict[str, Any]] = None
     best_score: float = 0.0
@@ -437,23 +443,21 @@ def match_player_candidate(
         p_team = (p.get("team") or "").upper()
         p_pos = (p.get("pos") or "").upper()
 
-        score = compute_name_similarity(raw_name, p_name)
-
-        # Team compatibility check
-        if cand_team and p_team:
-            if cand_team == p_team:
-                score += 8.0  # Team confirmation bonus
-            else:
-                score -= 25.0  # Mismatched team penalty
-
-        # Position compatibility check
+        if cand_team and p_team and cand_team != p_team:
+            continue
         if cand_pos and p_pos:
-            cand_group = "D" if cand_pos == "D" else "F"
-            p_group = "D" if p_pos == "D" else "F"
-            if cand_group == p_group:
-                score += 5.0
-            else:
-                score -= 20.0
+            cand_group = "D" if cand_pos in ("D", "DEF") else "F"
+            p_group = "D" if p_pos in ("D", "DEF") else "F"
+            if cand_group != p_group:
+                continue
+            if is_duplicate_name and cand_pos != p_pos:
+                continue
+
+        score = compute_name_similarity(raw_name, p_name)
+        if cand_team and p_team:
+            score += 8.0
+        if cand_pos and p_pos:
+            score += 5.0
 
         if score > best_score:
             best_score = score
@@ -462,23 +466,23 @@ def match_player_candidate(
     if not best_match or best_score < threshold:
         return None
 
-    # Resolve canonical booster key with namesake disambiguation
     matched_name = best_match.get("name", "")
-    is_duplicate = best_match.get("is_duplicate", False)
     matched_pos = best_match.get("pos", "")
     matched_team = best_match.get("team", "")
-
-    # Check for known namesakes (e.g. Elias Pettersson, Sebastian Aho)
-    from main import name_key, normalize_booster_name
     base_key = name_key(matched_name)
+    matched_is_duplicate = name_counts[normalize_text_token(matched_name)] > 1
 
-    # Disambiguate if duplicate or known namesakes
-    if is_duplicate or "elias pettersson" in base_key or "sebastian aho" in base_key:
+    if matched_is_duplicate:
         if not cand_pos:
-            print(f"⚠️ Warning: Ambiguous OCR match '{raw_name}' for duplicate player '{matched_name}' missing position in image. Skipping to prevent misattribution.")
+            print(
+                f"Ambiguous OCR match for duplicate player '{matched_name}': "
+                "position missing in image; skipping."
+            )
             return None
-        # Disambiguate using explicit candidate position and unified normalize_booster_name
-        canonical_key = normalize_booster_name(f"{matched_name} ({cand_pos})")
+        if best_match.get("is_pos_dup"):
+            canonical_key = normalize_booster_name(f"{matched_name} ({matched_pos}, {matched_team})")
+        else:
+            canonical_key = normalize_booster_name(f"{matched_name} ({matched_pos})")
     else:
         canonical_key = base_key
 
@@ -506,7 +510,7 @@ def parse_images_directory(
     folder_path: str,
     slate_players: List[Dict[str, Any]],
     ocr_backend: Optional[OCRBackend] = None,
-    threshold: float = 72.0
+    threshold: float = 85.0
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     """
     Processes all screenshot images in folder_path, extracting and fuzzy matching

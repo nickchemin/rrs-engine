@@ -2809,6 +2809,20 @@ class TestPhase4ImageParserAndOCR(unittest.TestCase):
         res_ambig = match_player_candidate(cand_ambig, slate)
         self.assertIsNone(res_ambig)
 
+    def test_match_player_candidate_rejects_wrong_team(self):
+        from image_parser import match_player_candidate
+        slate = [
+            {"id": 301, "name": "Elias Pettersson", "team": "VAN", "pos": "C", "is_duplicate": True},
+            {"id": 302, "name": "Elias Pettersson", "team": "BOS", "pos": "C", "is_duplicate": True},
+        ]
+        candidate = {"raw_name": "Elias Pettersson", "team": "BOS", "pos": "C", "booster_val": 0.7}
+        result = match_player_candidate(candidate, slate)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0]["team"], "BOS")
+
+        unknown_team = {"raw_name": "Elias Pettersson", "team": "SEA", "pos": "C", "booster_val": 0.7}
+        self.assertIsNone(match_player_candidate(unknown_team, slate))
+
     def test_parse_images_directory_with_mock_ocr(self):
         from image_parser import MockOCR, parse_images_directory
         # Create dummy image files
