@@ -258,7 +258,7 @@ class NHLClient:
 
                 self.db.save_standings(metrics)
         except Exception as e:
-            print(f"Failed to fetch standings: {e}")
+            logger.warning("Failed to fetch standings: %s", e)
 
         return metrics
 
@@ -293,7 +293,7 @@ class NHLClient:
                     })
                 self.db.save_schedule(schedule)
         except Exception as e:
-            print(f"Failed to fetch schedule: {e}")
+            logger.warning("Failed to fetch schedule: %s", e)
 
         return schedule
 
@@ -464,7 +464,7 @@ class NHLClient:
                 try:
                     raw_results[t] = future.result()
                 except Exception as e:
-                    print(f"Failed to fetch team skaters for {t}: {e}")
+                    logger.warning("Failed to fetch team skaters for %s: %s", t, e)
                     raw_results[t] = []
 
         results: Dict[str, List[Dict[str, Any]]] = {}
@@ -507,7 +507,7 @@ class NHLClient:
                 data = res.json()
                 return data.get("skaters", [])
         except Exception as e:
-            print(f"Failed to fetch club stats for {team_abbrev}: {e}")
+            logger.warning("Failed to fetch club stats for %s: %s", team_abbrev, e)
         return []
 
     def get_team_roster(self, team_abbrev: str) -> List[Dict[str, Any]]:
@@ -518,7 +518,7 @@ class NHLClient:
                 data = res.json()
                 return data.get("forwards", []) + data.get("defensemen", [])
         except Exception as e:
-            print(f"Failed to fetch roster for {team_abbrev}: {e}")
+            logger.warning("Failed to fetch roster for %s: %s", team_abbrev, e)
         return []
 
     def get_injuries(self, force: bool = False, max_age_hours: float = 3.0) -> Dict[Tuple[str, str], Dict[str, str]]:
@@ -558,7 +558,7 @@ class NHLClient:
                 if injuries_list:
                     self.db.save_injuries(injuries_list)
         except Exception as e:
-            print(f"Failed to fetch injury report: {e}")
+            logger.warning("Failed to fetch injury report: %s", e)
 
         return injuries_map
 
@@ -714,7 +714,7 @@ class NHLClient:
                         self._boxscore_cache[game_id] = skaters
                     return skaters
         except Exception as e:
-            print(f"Failed to fetch boxscore for game {game_id}: {e}")
+            logger.warning("Failed to fetch boxscore for game %s: %s", game_id, e)
         return {}
 
     def get_team_lines(self, team: str, force: bool = False) -> Dict[Any, Dict[str, Any]]:
@@ -738,7 +738,7 @@ class NHLClient:
                     comb = data.get("props", {}).get("pageProps", {}).get("combinations", {})
                     players = comb.get("players", [])
                     if not players:
-                        print(f"Warning: Daily Faceoff players data missing for {team}")
+                        logger.warning("Daily Faceoff players data missing for %s", team)
                     for p in players:
                         p_name = p.get("name")
                         if not p_name:
@@ -796,15 +796,15 @@ class NHLClient:
                     if lines_data and _has_deployment(lines_data):
                         self.db.save_team_lines(team, lines_data)
                 else:
-                    print(f"Warning: Daily Faceoff page structure changed (no __NEXT_DATA__) for {team}")
+                    logger.warning("Daily Faceoff page structure changed (no __NEXT_DATA__) for %s", team)
             else:
-                print(f"Warning: Daily Faceoff returned HTTP {res.status_code} for {team}")
+                logger.warning("Daily Faceoff returned HTTP %s for %s", res.status_code, team)
         except Exception as e:
-            print(f"Warning: Failed to fetch lines for {team}: {e}")
+            logger.warning("Failed to fetch lines for %s: %s", team, e)
 
         # Fall back to NHL API time-on-ice profiles when the scraped page has no usable deployment data.
         if not _has_deployment(lines_data):
-            print(f"Daily Faceoff lines for {team} have no deployment data; using NHL API fallback.")
+            logger.info("Daily Faceoff lines for %s have no deployment data; using NHL API fallback.", team)
             lines_data = self._fallback_team_lines_from_nhl_api(team)
 
         return lines_data

@@ -89,6 +89,11 @@ Both data files are ignored by git. Back them up before changing machines.
 | `python main.py --calibrate` | Fit scoring weights by OLS against recorded app ratings. |
 | `python main.py --train` | Run the out-of-sample model benchmark. |
 | `python main.py --slots 2.0,1.8,1.6,1.4,1.2` | Override slot multipliers. |
+| `python main.py --verbose` | Enable debug logging for data fetching. |
+| `python main.py --quiet` | Suppress warning and info logs. |
+
+Diagnostic logs are written to stderr. Lineup tables and reports stay on stdout,
+so piping the report does not mix in log lines.
 
 `--date` is limited to dates present in the current schedule payload or the
 local cache. Older historical dates require previously synced data.

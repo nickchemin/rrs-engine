@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import re
 import sys
@@ -74,6 +75,24 @@ NHL_TEAM_NAMES = {
     "STL": "St. Louis Blues", "TBL": "Tampa Bay Lightning", "TOR": "Toronto Maple Leafs", "UTA": "Utah Hockey Club",
     "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights", "WSH": "Washington Capitals", "WPG": "Winnipeg Jets"
 }
+
+
+def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
+    if quiet:
+        level = logging.ERROR
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.WARNING
+
+    logger = logging.getLogger("nhl_api")
+    logger.setLevel(level)
+    if not any(getattr(handler, "_rrs_handler", False) for handler in logger.handlers):
+        handler = logging.StreamHandler()
+        handler._rrs_handler = True
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
 
 
 def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str = ""):
@@ -1282,7 +1301,12 @@ def main():
     parser.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
     parser.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
     parser.add_argument("--slots", type=str, default="", help="Custom comma-separated slot multipliers (default: 2.0,1.8,1.6,1.4,1.2)")
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument("--verbose", action="store_true", help="Enable debug logging.")
+    log_group.add_argument("--quiet", action="store_true", help="Suppress warning and info logs.")
     args = parser.parse_args()
+
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
 
     custom_slots = None
     if args.slots:

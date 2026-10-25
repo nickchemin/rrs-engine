@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -33,6 +34,7 @@ from main import (
     build_skater_projection,
     collect_slate_skaters,
     compute_pair_synergy,
+    configure_logging,
     get_player_booster,
     handle_record_app_scores,
     is_dtd_status,
@@ -3540,6 +3542,28 @@ class TestBoosterFilePersistence(unittest.TestCase):
             self.assertIn("active guy", reloaded)
         finally:
             os.remove(path)
+
+
+class TestLogging(unittest.TestCase):
+    def test_configure_logging_sets_nhl_api_level(self):
+        logger = logging.getLogger("nhl_api")
+        original_level = logger.level
+        original_propagate = logger.propagate
+        try:
+            configure_logging()
+            self.assertEqual(logger.level, logging.WARNING)
+
+            configure_logging(verbose=True)
+            self.assertEqual(logger.level, logging.DEBUG)
+
+            configure_logging(quiet=True)
+            self.assertEqual(logger.level, logging.ERROR)
+        finally:
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+            for handler in list(logger.handlers):
+                if getattr(handler, "_rrs_handler", False):
+                    logger.removeHandler(handler)
 
 
 class TestSlateHelpers(unittest.TestCase):
