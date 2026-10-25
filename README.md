@@ -101,7 +101,9 @@ local cache. Older historical dates require previously synced data.
 ## Model Notes
 
 - Player projections use per-player Poisson and Ridge models trained on prior
-  games. Rolling form, opponent defense, home ice, and deployment are inputs.
+  games. Poisson targets are events per 60 minutes weighted by time on ice;
+  the predicted TOI converts rates back to per-game counts.
+- Rolling form, opponent defense, home ice, and deployment are inputs.
 - The default xRRS formula is a heuristic. `--calibrate` fits an OLS model
   against recorded app ratings; fitted weights are stored in the database and
   used by later projections only when at least 15 ground-truth records exist.

@@ -2378,8 +2378,20 @@ class TestModelFeatures(unittest.TestCase):
             {"gameDate": f"2026-10-{i:02d}", "goals": 0, "assists": 0, "shots": 1, "toi": "15:00"}
             for i in range(1, 21)
         ]
-        X, _ = predictor._extract_dataset(logs, {})
+        X, _, _ = predictor._extract_dataset(logs, {})
         self.assertEqual(X.shape[1], 14)
+
+    def test_feature_dataset_returns_exposure_weights(self):
+        predictor = PerformancePredictor()
+        logs = [
+            {"gameDate": f"2026-10-{i:02d}", "goals": 1, "assists": 0, "shots": 2, "toi": "20:00"}
+            for i in range(1, 11)
+        ]
+        X, targets, exposure = predictor._extract_dataset(logs, {})
+
+        self.assertEqual(X.shape[0], len(exposure))
+        self.assertTrue(np.allclose(exposure, 20.0 / 60.0))
+        self.assertEqual(targets["goals"][0], 1.0)
 
     def test_fatigue_multiplier_is_not_double_counted(self):
         predictor = PerformancePredictor()

@@ -215,9 +215,13 @@ class PerformancePredictor:
         self,
         game_logs: List[Dict[str, Any]],
         standings: Dict[str, Dict[str, float]]
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
         if len(game_logs) < 6:
-            return np.empty((0, 14)), {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")}
+            return (
+                np.empty((0, 14)),
+                {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")},
+                np.empty(0),
+            )
 
         parsed = []
         for g in game_logs:
@@ -233,9 +237,13 @@ class PerformancePredictor:
 
         X_rows = []
         y_dict = {"goals": [], "assists": [], "shots": [], "toi": []}
+        exposure_weights = []
 
         for i in range(5, len(parsed)):
             curr = parsed[i]
+            exposure_hours = curr["toi"] / 60.0
+            if exposure_hours <= 0.0:
+                continue
 
             opp_info = standings.get(curr["opp"], {})
             opp_def = float(opp_info.get("defense_factor", 1.0))
@@ -266,14 +274,16 @@ class PerformancePredictor:
             y_dict["assists"].append(curr["assists"])
             y_dict["shots"].append(curr["shots"])
             y_dict["toi"].append(curr["toi"])
+            exposure_weights.append(exposure_hours)
 
         X = np.array(X_rows, dtype=np.float64)
         targets = {k: np.array(v, dtype=np.float64) for k, v in y_dict.items()}
-        return X, targets
+        exposure = np.array(exposure_weights, dtype=np.float64)
+        return X, targets, exposure
 
     def train(self, game_logs: List[Dict[str, Any]], standings: Optional[Dict[str, Dict[str, float]]] = None):
         st = standings or {}
-        X, y_dict = self._extract_dataset(game_logs, st)
+        X, y_dict, exposure = self._extract_dataset(game_logs, st)
 
         if game_logs:
             parsed_tois = [parse_toi(g.get("toi", "00:00")) for g in game_logs]
@@ -297,19 +307,23 @@ class PerformancePredictor:
             std_X = np.std(X, axis=0)
             std_X[std_X == 0.0] = 1.0
             Z = (X - mean_X) / std_X
+            rate_targets = {
+                name: y_dict[name] / exposure
+                for name in ("goals", "assists", "shots")
+            }
 
             # If sample size N < 25, use stronger regularization alpha=3.0, else 1.5
             glm_alpha = 3.0 if len(X) < 25 else 1.5
             ridge_toi_alpha = 25.0 if len(X) < 25 else 15.0
 
             try:
-                # Count models with log-link: goals & assists
+                # Rate models with log-link and time-on-ice exposure
                 g_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
-                g_model.fit(Z, y_dict["goals"])
+                g_model.fit(Z, rate_targets["goals"], sample_weight=exposure)
                 self.glm_models["goals"] = (g_model, mean_X, std_X)
 
                 a_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
-                a_model.fit(Z, y_dict["assists"])
+                a_model.fit(Z, rate_targets["assists"], sample_weight=exposure)
                 self.glm_models["assists"] = (a_model, mean_X, std_X)
 
                 # Shots: Poisson or Tweedie (compound Poisson)
@@ -317,7 +331,7 @@ class PerformancePredictor:
                     s_model = TweedieRegressor(power=1.5, alpha=glm_alpha, max_iter=300)
                 else:
                     s_model = PoissonRegressor(alpha=glm_alpha, max_iter=300)
-                s_model.fit(Z, y_dict["shots"])
+                s_model.fit(Z, rate_targets["shots"], sample_weight=exposure)
                 self.glm_models["shots"] = (s_model, mean_X, std_X)
 
                 # TOI: Gaussian linear / Ridge regression
@@ -412,17 +426,22 @@ class PerformancePredictor:
                 try:
                     g_mod, mean_X, std_X = self.glm_models["goals"]
                     z_vec = (x_vec - mean_X) / std_X
-                    raw_g = float(g_mod.predict(z_vec)[0])
+                    raw_g_rate = float(g_mod.predict(z_vec)[0])
 
                     a_mod, _, _ = self.glm_models["assists"]
-                    raw_a = float(a_mod.predict(z_vec)[0])
+                    raw_a_rate = float(a_mod.predict(z_vec)[0])
 
                     s_mod, _, _ = self.glm_models["shots"]
-                    raw_s = float(s_mod.predict(z_vec)[0])
+                    raw_s_rate = float(s_mod.predict(z_vec)[0])
 
                     toi_mod = self.glm_models["toi"]
                     # toi_mod is Ridge, expecting original X
                     raw_toi = float(toi_mod.predict(x_vec)[0])
+
+                    exposure = max(raw_toi, 5.0) / 60.0
+                    raw_g = raw_g_rate * exposure
+                    raw_a = raw_a_rate * exposure
+                    raw_s = raw_s_rate * exposure
 
                     preds["goals"] = max(0.0, raw_g * fatigue_mult)
                     preds["assists"] = max(0.0, raw_a * fatigue_mult)
