@@ -556,7 +556,8 @@ def collect_slate_skaters(
     boosters: Dict[str, float],
     team_lines: Optional[Dict[str, Dict[Any, Dict[str, Any]]]] = None,
     game_date: str = "",
-    today_str: Optional[str] = None
+    today_str: Optional[str] = None,
+    scoring_weights: Optional[Dict[str, float]] = None
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int, int, Set[str]]:
     all_club_stats = client.get_all_club_stats(list(team_matchups.keys()))
     if team_lines is None:
@@ -564,6 +565,8 @@ def collect_slate_skaters(
 
     if today_str is None:
         today_str = nhl_today()
+    if scoring_weights is None and db is not None:
+        scoring_weights = db.get_model_params()
     is_past_date = bool(game_date and game_date < today_str)
 
     all_skater_names = []
@@ -725,7 +728,7 @@ def collect_slate_skaters(
 
             blk_pg = avg_toi * (0.09 if pos_key == "D" else 0.04)
             is_d = (pos_key == "D")
-            est_xrrs = calculate_xrrs_projection(g_pg, a_pg, s_pg, blk_pg, is_def=is_d)
+            est_xrrs = calculate_xrrs_projection(g_pg, a_pg, s_pg, blk_pg, is_def=is_d, weights=scoring_weights)
 
             active_skaters.append({
                 "id": p_id,
@@ -1116,13 +1119,14 @@ def build_skater_projection(
     standings: Dict[str, Dict[str, float]],
     game_date: str,
     today_str: Optional[str] = None,
-    db: Optional[Database] = None
+    db: Optional[Database] = None,
+    scoring_weights: Optional[Dict[str, float]] = None
 ) -> Tuple[float, float]:
     if today_str is None:
         today_str = nhl_today()
     train_logs = [l for l in logs if l.get("gameDate", "") < game_date]
     if train_logs:
-        predictor = PerformancePredictor()
+        predictor = PerformancePredictor(scoring_weights=scoring_weights)
         predictor.train(train_logs, standings)
         opp_raw = skater.get("opp", "")
         opp_clean = re.sub(r'^[vs@]+', '', opp_raw).strip()
@@ -1351,6 +1355,8 @@ def main():
     else:
         boosters = db.get_all_boosters()
 
+    model_weights = db.get_model_params()
+
     # 2. Get schedule and target date
     schedule = client.get_upcoming_schedule()
     if not schedule:
@@ -1386,7 +1392,7 @@ def main():
     print("Fetching club rosters and stats in parallel...")
     active_skaters, _, _, excluded_injuries, dtd_skipped, matched_keys = collect_slate_skaters(
         client, db, team_matchups, goalies, injuries, boosters, team_lines=team_lines,
-        game_date=game_date
+        game_date=game_date, scoring_weights=model_weights
     )
 
     if excluded_injuries > 0 or dtd_skipped > 0:
@@ -1423,7 +1429,8 @@ def main():
 
         today_str = nhl_today()
         pred_xrrs, base_pts = build_skater_projection(
-            s, logs, standings, game_date, today_str=today_str, db=db
+            s, logs, standings, game_date, today_str=today_str, db=db,
+            scoring_weights=model_weights
         )
 
         candidates.append({

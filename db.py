@@ -158,6 +158,12 @@ class Database:
                     updated_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS model_params (
+                    name TEXT PRIMARY KEY,
+                    value REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS injuries (
                     player_name TEXT NOT NULL,
                     team TEXT NOT NULL,
@@ -784,6 +790,28 @@ class Database:
                     opp_is_b2b = excluded.opp_is_b2b
             """, rows)
             conn.commit()
+
+    # --- Model Parameters ---
+    def save_model_params(self, params: Dict[str, float]):
+        now = time.time()
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM model_params")
+            for name, value in params.items():
+                cur.execute(
+                    "INSERT INTO model_params (name, value, updated_at) VALUES (?, ?, ?)",
+                    (name, float(value), now),
+                )
+            conn.commit()
+
+    def get_model_params(self) -> Optional[Dict[str, float]]:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name, value FROM model_params")
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        return {row["name"]: float(row["value"]) for row in rows}
 
     # --- Boosters ---
     def get_all_boosters(self) -> Dict[str, float]:

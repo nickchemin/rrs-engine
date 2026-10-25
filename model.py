@@ -198,8 +198,9 @@ def compute_line_factor(
 
 
 class PerformancePredictor:
-    def __init__(self, model_type: str = "poisson"):
+    def __init__(self, model_type: str = "poisson", scoring_weights: Optional[Dict[str, float]] = None):
         self.model_type = str(model_type or "poisson").lower()
+        self.scoring_weights = scoring_weights
         self.multi_model: Optional[RidgeRegression] = None
         self.glm_models: Dict[str, Any] = {}
         self.trained = False
@@ -511,7 +512,8 @@ class PerformancePredictor:
             xa=preds["assists"],
             xsog=preds["shots"],
             xblk=blocked,
-            is_def=is_def
+            is_def=is_def,
+            weights=self.scoring_weights
         )
         rrs_base = min(MAX_RRS, rrs_base)
 
@@ -534,16 +536,24 @@ def calculate_xrrs_projection(
     xa: float,
     xsog: float,
     xblk: float,
-    is_def: bool = False
+    is_def: bool = False,
+    weights: Optional[Dict[str, float]] = None
 ) -> float:
     """
-    Computes expected Real Rating (xRRS) calibrated to the Real Sports mobile app:
-    - Zero-point baseline: 0.0 - 0.9 (peripherals: SOG ~0.16, BLK ~0.35).
-    - Goal expectancy: ~2.5 - 2.8 rating.
-    - Assist expectancy: ~1.0 - 1.2 rating.
-    - Multi-point exponential upside.
-    - Low-event / non-scoring skaters are capped to prevent the 'high booster trap'.
+    Computes expected Real Rating (xRRS) calibrated to the Real Sports mobile app.
+    When calibrated weights are supplied, the score is a linear combination of
+    goals, assists, shots, and blocks with the fitted intercept.
     """
+    if weights:
+        xrrs = (
+            float(weights.get("intercept", 0.0))
+            + xg * float(weights.get("goals", 2.50))
+            + xa * float(weights.get("assists", 1.05))
+            + xsog * float(weights.get("shots", 0.25))
+            + xblk * float(weights.get("blocks", 0.50))
+        )
+        return round(float(np.clip(xrrs, 0.0, MAX_RRS)), 2)
+
     xpts = xg + xa
     periph = xsog * 0.25 + xblk * 0.50
     scoring_ev = (xg * 2.50) + (xa * 1.05)
@@ -727,6 +737,13 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
         "stacking_test": stacking_result
     }
 
+    persisted = False
+    min_calibration_samples = 15
+    if is_ground_truth and len(valid) >= min_calibration_samples and hasattr(db, "save_model_params"):
+        db.save_model_params(weights_dict)
+        persisted = True
+    result["persisted"] = persisted
+
     print("\n" + "=" * 80)
     print("           REAL SPORTS RRS EMPIRICAL FORMULA CALIBRATION (OLS)")
     print("=" * 80)
@@ -752,6 +769,14 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
         print(f"  • Additive Model MAE:       {stacking_result['mae_additive']:.3f} RRS")
         print(f"  • Multiplicative Model MAE: {stacking_result['mae_multiplicative']:.3f} RRS")
         print(f"  • Confirmed Mechanic:       {stacking_result['verified_structure']}")
+
+    if persisted:
+        print("\nCalibrated weights saved; future projections will use them.")
+    elif is_ground_truth:
+        print(
+            f"\nCalibrated weights were not saved: at least {min_calibration_samples} "
+            "ground-truth samples are required."
+        )
 
     print("=" * 80 + "\n")
     return result

@@ -592,6 +592,52 @@ class TestDatabaseAndHistory(unittest.TestCase):
         self.assertEqual(calculate_rrs_from_stats(goals=4, assists=4, shots=10, blocks=5), MAX_RRS)
         self.assertEqual(calculate_xrrs_projection(5.0, 5.0, 10.0, 5.0), MAX_RRS)
 
+    def test_calibrated_weights_override_default_formula(self):
+        weights = {"intercept": 0.1, "goals": 3.0, "assists": 1.0, "shots": 0.2, "blocks": 0.4}
+        projected = calculate_xrrs_projection(1.0, 1.0, 2.0, 1.0, weights=weights)
+        self.assertAlmostEqual(projected, 4.9, places=2)
+
+    def test_calibration_persists_ground_truth_weights(self):
+        class FakeDB:
+            def __init__(self, records):
+                self.records = records
+                self.saved = None
+
+            def get_settled_stats_for_calibration(self):
+                return self.records
+
+            def save_model_params(self, params):
+                self.saved = params
+
+        records = []
+        for i in range(20):
+            goals = i % 3
+            assists = (i + 1) % 3
+            shots = 2 + i % 2
+            records.append({
+                "actual_goals": goals,
+                "actual_assists": assists,
+                "actual_shots": shots,
+                "actual_blocks": 1.0,
+                "app_rrs": 0.2 + 2.5 * goals + 1.05 * assists + 0.25 * shots + 0.5,
+                "slot_boost": 2.0,
+                "booster": 0.1,
+                "app_payout": None,
+            })
+
+        fake_db = FakeDB(records)
+        result = calibrate_rrs_formula(fake_db)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["persisted"])
+        self.assertEqual(fake_db.saved, result["weights"])
+
+        small_db = FakeDB(records[:8])
+        small_result = calibrate_rrs_formula(small_db)
+        self.assertIsNotNone(small_result)
+        self.assertFalse(small_result["persisted"])
+        self.assertIsNone(small_db.saved)
+
     def test_settle_past_lineups_dnp(self):
         lineup = [
             {"id": 101, "name": "Scratched Player", "team": "BOS", "opp": "vsTOR", "slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "xRRS": 3.0, "score": 6.0, "booster": 0.0}
@@ -3409,6 +3455,23 @@ class TestDatabasePersistence(unittest.TestCase):
         self.assertEqual(len(logs), 2)
         self.assertEqual(logs[1]["rest_days"], 1.0)
         self.assertEqual(logs[1]["is_b2b"], 1)
+
+    def test_model_params_roundtrip(self):
+        self.assertIsNone(self.db.get_model_params())
+
+        self.db.save_model_params({
+            "intercept": 0.1,
+            "goals": 3.0,
+            "assists": 1.0,
+            "shots": 0.2,
+            "blocks": 0.4,
+        })
+        params = self.db.get_model_params()
+        self.assertEqual(params["goals"], 3.0)
+        self.assertEqual(params["intercept"], 0.1)
+
+        self.db.save_model_params({"goals": 2.0})
+        self.assertEqual(self.db.get_model_params(), {"goals": 2.0})
 
     def test_writes_accept_missing_numeric_values(self):
         self.db.save_player(7003, "Test Skater Three", team="COL", position="C")
