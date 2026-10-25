@@ -449,7 +449,7 @@ def match_player_candidate(
         (matched_player_dict, canonical_booster_key, confidence_score)
         or None if no confident match was found.
     """
-    from main import name_key, normalize_booster_name
+    from boosters import name_key, normalize_booster_name
 
     raw_name = candidate.get("raw_name", "")
     cand_team = (candidate.get("team") or "").upper()
@@ -656,14 +656,14 @@ def handle_parse_images(
     Scans screenshots, matches players to game-day roster, merges into boosters.txt,
     and synchronizes updated values to SQLite database.
     """
-    from main import (
+    from boosters import (
         BOOSTERS_FILE,
-        collect_slate_skaters,
         load_boosters_file,
-        nhl_today,
         save_boosters_file,
         sync_boosters_to_db,
     )
+    from main import collect_slate_skaters
+    from nhl_api import nhl_today
 
     target_boosters_file = boosters_path or BOOSTERS_FILE
 

@@ -54,6 +54,7 @@ addopts = "-ra"
 
 [tool.coverage.run]
 source = [
+    "boosters",
     "db",
     "image_parser",
     "main",

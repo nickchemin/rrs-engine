@@ -128,7 +128,7 @@ local cache. Older historical dates require previously synced data.
 ```bash
 pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer,paths,slate -m unittest discover -s tests
+python -m coverage run --source=boosters,db,image_parser,main,model,nhl_api,optimizer,paths,slate -m unittest discover -s tests
 python -m coverage report
 ```
 
