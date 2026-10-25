@@ -590,7 +590,7 @@ def print_lineup_table(
 
     print("-" * width)
     if sim_metrics:
-        print("🎲 Monte-Carlo Simulation (10,000 iterations | Covariance & Cholesky):")
+        print("Monte-Carlo Simulation (10,000 iterations | Covariance & Cholesky):")
         print(f"   Expected Score (Mean):     {sim_metrics['mean']:.1f} RRS  (std: ±{sim_metrics['std']:.1f} RRS)")
         print(f"   Floor (25th percentile):   {sim_metrics['floor_25']:.1f} RRS  [Cash Game Baseline]")
         print(f"   Ceiling (90th percentile): {sim_metrics['ceiling_90']:.1f} RRS  |  Ceiling (95th percentile): {sim_metrics['ceiling_95']:.1f} RRS  [GPP Tournament Upside]")
@@ -601,7 +601,7 @@ def print_lineup_table(
     stacks_found = [p['stack'] for p in lineup if p.get('stack')]
     if stacks_found:
         unique_stacks = sorted(list(set(stacks_found)))
-        print(f"⚡ Quant Summary: Top EV driver {top_name} ({top_p['total_boost']:.1f}x Boost) | Synergistic {', '.join(unique_stacks)} upside stack")
+        print(f"Quant Summary: Top EV driver {top_name} ({top_p['total_boost']:.1f}x Boost) | Synergistic {', '.join(unique_stacks)} upside stack")
     elif top_p:
-        print(f"⚡ Quant Summary: Anchor play {top_name} ({top_p['total_boost']:.1f}x Boost) | Projected Lineup Total: {total_score:.1f} RRS")
+        print(f"Quant Summary: Anchor play {top_name} ({top_p['total_boost']:.1f}x Boost) | Projected Lineup Total: {total_score:.1f} RRS")
     print("=" * width + "\n")

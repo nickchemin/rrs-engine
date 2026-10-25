@@ -543,7 +543,7 @@ def parse_images_directory(
     detailed_matches: List[Dict[str, Any]] = []
 
     if not image_files:
-        print(f"⚠️ Warning: No image files found in '{folder_path}'.")
+        print(f"Warning: No image files found in '{folder_path}'.")
         return detected_boosters, detailed_matches
 
     print(f"\nScanning {len(image_files)} draft screenshot(s) from: {folder_path}")
@@ -559,7 +559,7 @@ def parse_images_directory(
         try:
             raw_text = backend.extract_text(img_path)
         except Exception as e:
-            print(f"\n⚠️ Warning: Failed to extract text from '{filename}': {e}")
+            print(f"\nWarning: Failed to extract text from '{filename}': {e}")
             continue
 
         candidates = extract_booster_candidates_from_text(raw_text)
@@ -666,12 +666,12 @@ def handle_parse_images(
     target_boosters_file = boosters_path or BOOSTERS_FILE
 
     if not os.path.exists(folder_path):
-        print(f"❌ Error: Directory '{folder_path}' does not exist.")
+        print(f"Error: Directory '{folder_path}' does not exist.")
         return {}
 
     image_files = scan_image_files(folder_path)
     if not image_files:
-        print(f"❌ Error: No supported images (.png, .jpg, .webp) found in '{folder_path}'.")
+        print(f"Error: No supported images (.png, .jpg, .webp) found in '{folder_path}'.")
         return {}
 
     # 1. Fetch upcoming schedule to resolve target date and matchups
@@ -769,7 +769,7 @@ def handle_parse_images(
     sync_boosters_to_db(db, current_boosters)
 
     print(
-        f"✓ Successfully processed {len(matches)} boosters: "
+        f"Successfully processed {len(matches)} boosters: "
         f"{updated_count} updated, {added_count} newly added into {os.path.basename(target_boosters_file)} "
         f"and synchronized to SQLite database."
     )

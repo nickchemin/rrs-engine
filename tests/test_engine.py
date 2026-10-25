@@ -1122,7 +1122,7 @@ class TestQAThirdReview(unittest.TestCase):
             with patch("sys.stdout", buf):
                 boosters = load_boosters_file(path)
             self.assertEqual(boosters, {})
-            self.assertIn("💡 Hint", buf.getvalue())
+            self.assertIn("Hint", buf.getvalue())
             self.assertIn("Remove '#' to activate", buf.getvalue())
         finally:
             if os.path.exists(path):
@@ -1543,7 +1543,7 @@ class TestQAFourthReview(unittest.TestCase):
         with patch("sys.stdout", buf):
             val_80 = parse_booster_val("80")
         self.assertEqual(val_80, 0.8)
-        self.assertIn("читаю 80 как 80%", buf.getvalue())
+        self.assertIn("treated as percentage (0.8)", buf.getvalue())
 
         fd, path = tempfile.mkstemp(suffix=".txt")
         os.close(fd)
@@ -2182,7 +2182,7 @@ class TestReviewFixes(unittest.TestCase):
         with patch("sys.stdout", buf):
             handle_record_app_scores(self.db, "invalid-date:5.2,3.8")
         out = buf.getvalue()
-        self.assertIn("⚠️ Error:", out)
+        self.assertIn("Error:", out)
 
     # 19. Mutually exclusive group includes --record
     def test_record_mutually_exclusive_with_sync_and_history(self):

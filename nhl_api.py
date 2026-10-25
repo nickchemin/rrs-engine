@@ -736,7 +736,7 @@ class NHLClient:
                     comb = data.get("props", {}).get("pageProps", {}).get("combinations", {})
                     players = comb.get("players", [])
                     if not players:
-                        print(f"⚠️ Warning: Daily Faceoff players data missing for {team}")
+                        print(f"Warning: Daily Faceoff players data missing for {team}")
                     for p in players:
                         p_name = p.get("name")
                         if not p_name:
@@ -794,11 +794,11 @@ class NHLClient:
                     if lines_data and _has_deployment(lines_data):
                         self.db.save_team_lines(team, lines_data)
                 else:
-                    print(f"⚠️ Warning: Daily Faceoff page structure changed (no __NEXT_DATA__) for {team}")
+                    print(f"Warning: Daily Faceoff page structure changed (no __NEXT_DATA__) for {team}")
             else:
-                print(f"⚠️ Warning: Daily Faceoff returned HTTP {res.status_code} for {team}")
+                print(f"Warning: Daily Faceoff returned HTTP {res.status_code} for {team}")
         except Exception as e:
-            print(f"⚠️ Warning: Failed to fetch lines for {team}: {e}")
+            print(f"Warning: Failed to fetch lines for {team}: {e}")
 
         # Fall back to NHL API time-on-ice profiles when the scraped page has no usable deployment data.
         if not _has_deployment(lines_data):

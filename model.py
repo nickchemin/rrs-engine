@@ -613,7 +613,7 @@ def calculate_rrs_from_stats(
 def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Optional[Dict[str, Any]]:
     records = db.get_settled_stats_for_calibration() if hasattr(db, "get_settled_stats_for_calibration") else []
     if not records:
-        print("\n⚠️ No settled player records found in lineup_history. Accumulate match outcomes to run empirical calibration.\n")
+        print("\nNo settled player records found in lineup_history. Accumulate match outcomes to run empirical calibration.\n")
         return None
 
     # Check for Ground Truth (app_rrs from Real Sports app)
@@ -627,7 +627,7 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
         target_records = records
         target_label = "Internal Heuristic Estimates (Synthetic actual_xrrs Fallback)"
     else:
-        print("\n⚠️ No actual Real Sports mobile app ratings (app_rrs) found in lineup_history.")
+        print("\nNo actual Real Sports mobile app ratings (app_rrs) found in lineup_history.")
         print("To avoid self-referential / circular validation of internal heuristics,")
         print("record actual app scores with: python main.py --record [YYYY-MM-DD]\n")
         return None
@@ -652,7 +652,7 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
             })
 
     if len(valid) < 5:
-        print(f"\n⚠️ Need at least 5 settled records for empirical regression calibration (found {len(valid)}).")
+        print(f"\nNeed at least 5 settled records for empirical regression calibration (found {len(valid)}).")
         print("Run with --history, allow slate settlement, or record app scores with --record.\n")
         return None
 
@@ -774,9 +774,9 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
     print(f"Target:      {target_label}")
     print(f"Sample Size: {len(valid)} settled match boxscores from lineup_history")
     if sample_warning:
-        print(f"             ⚠️ {sample_warning}")
+        print(f"             {sample_warning}")
     if not is_ground_truth:
-        print("⚠️ Warning: Ground-truth app_rrs not found (synthetic fallback used).")
+        print("Warning: Ground-truth app_rrs not found (synthetic fallback used).")
         print("   Record actual Real Sports mobile app ratings via: python main.py --record [date]")
     print("\nEstimated Event Weights (OLS):")
     for name, w in weights_dict.items():

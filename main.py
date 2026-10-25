@@ -102,7 +102,7 @@ def parse_booster_val(val_str: str, line_num: Optional[int] = None) -> float:
     m = re.match(r'^\+?(\d+\.?\d*|\.\d+)\s*([x%])?$', s)
     if not m or not m.group(1):
         loc = f"Line {line_num}: " if line_num is not None else ""
-        print(f"⚠️ Warning: {loc}Could not parse booster value '{val_str}', defaulting to 0.0")
+        print(f"Warning: {loc}Could not parse booster value '{val_str}', defaulting to 0.0")
         return 0.0
 
     num = float(m.group(1))
@@ -113,13 +113,13 @@ def parse_booster_val(val_str: str, line_num: Optional[int] = None) -> float:
     elif unit == "x":
         if num > 5.0:
             loc = f"Line {line_num}: " if line_num is not None else ""
-            print(f"⚠️ Warning: {loc}large booster multiplier {num:g}x")
+            print(f"Warning: {loc}large booster multiplier {num:g}x")
         return num
     else:
         if num > 5.0:
             val_pct = round(num / 100.0, 4)
             loc = f"Line {line_num}: " if line_num is not None else ""
-            print(f"⚠️ Warning: {loc}value {num:g} > 5.0 without unit treated as percentage ({val_pct:g}) (читаю {num:g} как {num:g}%, то есть {val_pct:g})")
+            print(f"Warning: {loc}value {num:g} > 5.0 without unit treated as percentage ({val_pct:g})")
             return val_pct
         return num
 
@@ -234,7 +234,7 @@ def resolve_booster(
         if base in boosters or base.lower() in boosters:
             if base not in _warned_ambiguous_names:
                 _warned_ambiguous_names.add(base)
-                print(f"⚠️ Warning: Ambiguous booster key '{name}' matched multiple active players. Please specify position in boosters.txt.")
+                print(f"Warning: Ambiguous booster key '{name}' matched multiple active players. Please specify position in boosters.txt.")
         return 0.0, None
     else:
         keys_to_try = [base]
@@ -294,7 +294,7 @@ def load_boosters_file(path: str = BOOSTERS_FILE) -> Dict[str, float]:
                         chk_name = p[0].strip()
                         chk_val = parse_booster_val(p[1], line_num=line_num)
                         if chk_val > 0.0:
-                            print(f"💡 Hint (Line {line_num}): '{chk_name}' has booster {chk_val:g} but line is commented out with '#'. Remove '#' to activate.")
+                            print(f"Hint (Line {line_num}): '{chk_name}' has booster {chk_val:g} but line is commented out with '#'. Remove '#' to activate.")
                 continue
 
             # Support '=', ':', or whitespace separation
@@ -326,7 +326,7 @@ def save_boosters_file(
     target_path = path or BOOSTERS_FILE
     all_skaters = list(active_players) + list(dtd_players or []) + list(depth_players or [])
     if not all_skaters:
-        print("⚠️ Warning: No player statistics loaded from NHL API; boosters.txt was not modified.")
+        print("Warning: No player statistics loaded from NHL API; boosters.txt was not modified.")
         return
 
     # Extract existing team sections to preserve any team that failed to load
@@ -1193,7 +1193,7 @@ def handle_record_app_scores(db: Database, record_arg: str):
             target_date = parse_iso_date_arg(record_arg.strip()) if record_arg != "today" else nhl_today()
             score_tokens = []
     except (argparse.ArgumentTypeError, ValueError) as e:
-        print(f"⚠️ Error: {e}")
+        print(f"Error: {e}")
         return
 
     lineup = db.get_lineup_for_date(target_date, mode="standard")
@@ -1203,7 +1203,7 @@ def handle_record_app_scores(db: Database, record_arg: str):
             lineup = [p for p in all_lineups if p.get("mode") == all_lineups[0].get("mode")]
 
     if not lineup:
-        print(f"\n⚠️ No lineup history found for date: {target_date}. Generate lineups first before recording results.\n")
+        print(f"\nNo lineup history found for date: {target_date}. Generate lineups first before recording results.\n")
         return
 
     updates = []
@@ -1260,7 +1260,7 @@ def handle_record_app_scores(db: Database, record_arg: str):
                 "app_payout": app_payout_val
             })
             payout_str = f" (Payout = {app_payout_val:.1f} RRS)" if app_payout_val is not None else ""
-            print(f"  ✓ Slot #{slot} {p_name:<20}: App RRS = {app_rrs_val:.1f}{payout_str}")
+            print(f"  Slot #{slot} {p_name:<20}: App RRS = {app_rrs_val:.1f}{payout_str}")
 
     if updates:
         db.record_app_results(updates)
@@ -1287,10 +1287,10 @@ def main():
         try:
             custom_slots = [float(x.strip()) for x in args.slots.split(",") if x.strip()]
             if len(custom_slots) < 5:
-                print(f"⚠️ Warning: Provided {len(custom_slots)} custom slots (expected 5). Falling back to default.")
+                print(f"Warning: Provided {len(custom_slots)} custom slots (expected 5). Falling back to default.")
                 custom_slots = None
         except ValueError:
-            print("⚠️ Warning: Invalid slot format. Expected comma-separated floats (e.g. 2.0,1.8,1.6,1.4,1.2).")
+            print("Warning: Invalid slot format. Expected comma-separated floats (e.g. 2.0,1.8,1.6,1.4,1.2).")
             custom_slots = None
 
     if args.sync:
@@ -1409,7 +1409,7 @@ def main():
     # Check for unmatched boosters (> 0) to notify user of potential typos
     unmatched_boosters = [k for k, v in boosters.items() if v > 0.0 and k not in matched_keys]
     if unmatched_boosters:
-        print(f"⚠️ Warning: Unused boosters (>0) not matched to any slate skater: {', '.join(sorted(unmatched_boosters))}")
+        print(f"Warning: Unused boosters (>0) not matched to any slate skater: {', '.join(sorted(unmatched_boosters))}")
 
     # Prefetch game logs in parallel for all active skaters
     print(f"Synchronizing game logs for {len(active_skaters)} qualifying skaters (in parallel)...")
@@ -1460,7 +1460,7 @@ def main():
     can_save_history = not is_slate_started(games, game_date, today_str)
 
     if candidates and all(c.get("xRRS", 0.0) == 0.0 for c in candidates):
-        print(f"\n⚠️ Warning: No valid historical projections available for slate {game_date}. All skater projections evaluated to 0.0 (historical game logs prior to {game_date} are missing). Run with a current date or populate historical logs.")
+        print(f"\nWarning: No valid historical projections available for slate {game_date}. All skater projections evaluated to 0.0 (historical game logs prior to {game_date} are missing). Run with a current date or populate historical logs.")
         return
 
     # 4. Solve optimal 5-slot lineup(s)
