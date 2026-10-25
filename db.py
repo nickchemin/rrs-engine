@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+from paths import database_path
+
+DB_PATH = str(database_path())
 
 
 def season_from_date(game_date: str) -> str:
@@ -81,6 +83,9 @@ class TeamLines(dict):
 class Database:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+        parent = os.path.dirname(os.path.abspath(db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self._init_schema()
 
     @contextmanager

@@ -47,6 +47,7 @@ source = [
     "model",
     "nhl_api",
     "optimizer",
+    "paths",
 ]
 
 [tool.coverage.report]

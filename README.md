@@ -57,13 +57,23 @@ projected payout quantiles.
 
 ## Data
 
-Runtime state lives next to the source files:
+Runtime state is stored in the user data directory:
+
+- Windows: `%LOCALAPPDATA%\rrs-engine`
+- macOS: `~/Library/Application Support/rrs-engine`
+- Linux: `$XDG_DATA_HOME/rrs-engine` or `~/.local/share/rrs-engine`
+
+The directory contains:
 
 - `data.db` - SQLite database with players, game logs, lines, standings, and
   lineup history.
 - `boosters.txt` - player booster values, partitioned by team.
 
-Both files are ignored by git. Back them up before changing machines.
+Set `RRS_DATA_DIR` to use a different directory. On first start, `data.db` and
+`boosters.txt` found next to the source files are copied into the data
+directory once; existing files are never overwritten.
+
+Both data files are ignored by git. Back them up before changing machines.
 
 ## Commands
 
@@ -101,7 +111,7 @@ local cache. Older historical dates require previously synced data.
 ```bash
 pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer -m unittest discover -s tests
+python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer,paths -m unittest discover -s tests
 python -m coverage report
 ```
 

@@ -5,6 +5,7 @@ import sys
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from db import Database
@@ -18,6 +19,7 @@ from model import (
     evaluate_model,
 )
 from nhl_api import NHLClient, nhl_today
+from paths import boosters_path, migrate_legacy_files
 
 # Ensure UTF-8 output on Windows console
 if sys.platform == "win32":
@@ -51,8 +53,7 @@ __all__ = [
     "solve_stacked_lineup",
 ]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BOOSTERS_FILE = os.path.join(BASE_DIR, "boosters.txt")
+BOOSTERS_FILE = str(boosters_path())
 
 ESPN_TEAM_MAP = {
     "NJ": "NJD",
@@ -1322,6 +1323,7 @@ def main():
 
     print_quant_banner(mode=mode_label, target_date=args.date)
 
+    migrate_legacy_files(Path(__file__).resolve().parent)
     db = Database()
     client = NHLClient(db=db)
     standings = client.get_standings()

@@ -36,5 +36,5 @@ jobs:
 
       - name: Run test suite
         run: |
-          python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer -m unittest discover -s tests -v
+          python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer,paths -m unittest discover -s tests -v
           python -m coverage report

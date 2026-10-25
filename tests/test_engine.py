@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -19,7 +20,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+TEST_DATA_DIR = os.path.join(tempfile.gettempdir(), f"rrs-test-data-{os.getpid()}")
+os.makedirs(TEST_DATA_DIR, exist_ok=True)
+os.environ["RRS_DATA_DIR"] = TEST_DATA_DIR
+
 import optimizer
+import paths
 from db import Database, TeamLines, season_from_date
 from main import (
     _warned_ambiguous_names,
@@ -3533,6 +3539,35 @@ class TestBoosterFilePersistence(unittest.TestCase):
             self.assertIn("active guy", reloaded)
         finally:
             os.remove(path)
+
+
+class TestDataPaths(unittest.TestCase):
+    def test_override_controls_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"RRS_DATA_DIR": tmp}):
+                self.assertEqual(paths.data_dir(), Path(tmp))
+                self.assertEqual(paths.database_path(), Path(tmp) / "data.db")
+                self.assertEqual(paths.boosters_path(), Path(tmp) / "boosters.txt")
+
+    def test_legacy_files_migrate_once(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as target:
+            source_path = Path(source)
+            target_path = Path(target)
+            (source_path / "boosters.txt").write_text("x = 1\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"RRS_DATA_DIR": str(target_path)}):
+                paths.migrate_legacy_files(source_path)
+                self.assertEqual(
+                    (target_path / "boosters.txt").read_text(encoding="utf-8"),
+                    "x = 1\n",
+                )
+
+                (source_path / "boosters.txt").write_text("x = 2\n", encoding="utf-8")
+                paths.migrate_legacy_files(source_path)
+                self.assertEqual(
+                    (target_path / "boosters.txt").read_text(encoding="utf-8"),
+                    "x = 1\n",
+                )
 
 
 if __name__ == "__main__":
