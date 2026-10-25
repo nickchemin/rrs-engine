@@ -3153,6 +3153,49 @@ class TestPhase5ComprehensiveSuite(unittest.TestCase):
         self.assertFalse(adapter.max_retries.raise_on_status)
 
 
+class TestLineupHistoryPersistence(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.tmp_dir, "history.db"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _lineup(names):
+        return [
+            {
+                "slot": index + 1,
+                "slot_boost": 2.0 - 0.2 * index,
+                "name": name,
+                "team": "COL",
+                "opp": "vs BOS",
+                "ev_line": "L1",
+                "pp_unit": "PP1",
+                "booster": 0.1,
+                "total_boost": 2.1 - 0.2 * index,
+                "xRRS": 5.0,
+                "score": 10.0,
+            }
+            for index, name in enumerate(names)
+        ]
+
+    def test_resaving_lineup_preserves_settled_results(self):
+        self.db.save_lineup_history("2026-10-20", "standard", self._lineup(["A", "B", "C", "D", "E"]))
+        entry = self.db.get_lineup_for_date("2026-10-20", "standard")[0]
+        self.db.settle_history_player(entry["id"], 1.0, 0.0, 3.0, "18:00", 3.0, 6.0)
+        self.db.record_app_results([{"id": entry["id"], "app_rrs": 5.5, "app_payout": 11.0}])
+
+        self.db.save_lineup_history("2026-10-20", "standard", self._lineup(["A", "B", "C", "D"]))
+
+        rows = self.db.get_lineup_for_date("2026-10-20", "standard")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[0]["settled"], 1)
+        self.assertEqual(rows[0]["actual_goals"], 1.0)
+        self.assertEqual(rows[0]["app_rrs"], 5.5)
+        self.assertEqual(rows[0]["app_payout"], 11.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

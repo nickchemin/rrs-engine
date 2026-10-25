@@ -982,7 +982,10 @@ class Database:
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM lineup_history WHERE game_date = ? AND mode = ?", (game_date, mode))
+            cur.execute(
+                "DELETE FROM lineup_history WHERE game_date = ? AND mode = ? AND settled = 0 AND slot > ?",
+                (game_date, mode, len(lineup)),
+            )
             for item in lineup:
                 cur.execute("""
                     INSERT INTO lineup_history (
@@ -990,6 +993,18 @@ class Database:
                         team, opponent, ev_line, pp_unit, booster, total_boost, proj_xrrs, proj_rrs,
                         calibrated, settled, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+                    ON CONFLICT(game_date, mode, slot) DO UPDATE SET
+                        slot_boost = excluded.slot_boost,
+                        player_id = excluded.player_id,
+                        player_name = excluded.player_name,
+                        team = excluded.team,
+                        opponent = excluded.opponent,
+                        ev_line = excluded.ev_line,
+                        pp_unit = excluded.pp_unit,
+                        booster = excluded.booster,
+                        total_boost = excluded.total_boost,
+                        proj_xrrs = excluded.proj_xrrs,
+                        proj_rrs = excluded.proj_rrs
                 """, (
                     game_date,
                     mode,
