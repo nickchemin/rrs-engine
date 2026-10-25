@@ -1,3 +1,4 @@
 # Development and CI dependencies.
 pytest>=8.0
 coverage>=7.0
+ruff>=0.17
