@@ -1,6 +1,7 @@
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
-from datetime import datetime
-from typing import Dict, List, Any, Tuple, Optional
+
 try:
     from sklearn.linear_model import PoissonRegressor, TweedieRegressor
 except ImportError:

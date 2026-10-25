@@ -1,78 +1,75 @@
+import argparse
 import io
 import json
 import os
-import sys
 import shutil
 import sqlite3
-import unittest
+import sys
 import tempfile
-import argparse
-import requests
-from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone, timedelta
 import time
+import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
+
 import numpy as np
+import requests
 
 # Ensure repo root is on sys.path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from db import Database, season_from_date, TeamLines
-from nhl_api import (
-    NHLClient,
-    nhl_now,
-    nhl_today,
-    current_season_start_year,
-    compute_goalie_factor,
-    _has_deployment,
-    TEAM_SLUG_MAP,
-    USEasternTz
+import optimizer
+from db import Database, TeamLines, season_from_date
+from main import (
+    _warned_ambiguous_names,
+    assign_slots,
+    build_skater_projection,
+    collect_slate_skaters,
+    compute_pair_synergy,
+    get_player_booster,
+    handle_record_app_scores,
+    is_dtd_status,
+    is_out_status,
+    is_slate_started,
+    load_boosters_file,
+    match_injury,
+    name_key,
+    normalize_booster_name,
+    parse_booster_val,
+    parse_history_arg,
+    parse_iso_date_arg,
+    print_lineup_table,
+    print_quant_banner,
+    resolve_booster,
+    save_boosters_file,
+    settle_past_lineups,
+    show_history_report,
+    solve_optimal_lineup,
+    solve_stacked_lineup,
+    sync_boosters_to_db,
+    sync_game_day,
 )
+from main import main as main_entry
 from model import (
     PerformancePredictor,
     calculate_rrs_from_stats,
     calculate_xrrs_projection,
-    compute_line_factor,
     calibrate_rrs_formula,
-    evaluate_model
+    compute_line_factor,
+    evaluate_model,
 )
-import optimizer
-from optimizer import (
-    compute_pair_correlation,
-    build_lineup_correlation_matrix,
-    simulate_lineup_distribution
+from nhl_api import (
+    TEAM_SLUG_MAP,
+    NHLClient,
+    USEasternTz,
+    _has_deployment,
+    compute_goalie_factor,
+    current_season_start_year,
+    nhl_now,
+    nhl_today,
 )
-from main import (
-    parse_iso_date_arg,
-    parse_history_arg,
-    name_key,
-    parse_booster_val,
-    normalize_booster_name,
-    resolve_booster,
-    get_player_booster,
-    load_boosters_file,
-    save_boosters_file,
-    sync_boosters_to_db,
-    collect_slate_skaters,
-    is_slate_started,
-    build_skater_projection,
-    match_injury,
-    is_out_status,
-    is_dtd_status,
-    solve_optimal_lineup,
-    solve_stacked_lineup,
-    compute_pair_synergy,
-    sync_game_day,
-    show_history_report,
-    assign_slots,
-    settle_past_lineups,
-    print_quant_banner,
-    print_lineup_table,
-    handle_record_app_scores,
-    _warned_ambiguous_names,
-    main as main_entry
-)
+from optimizer import build_lineup_correlation_matrix, compute_pair_correlation, simulate_lineup_distribution
 
 
 class TestTimezoneAndDates(unittest.TestCase):
@@ -919,8 +916,9 @@ class TestQAThirdReview(unittest.TestCase):
 
     # Tuple typing import in db.py
     def test_team_lines_accepts_typed_keys(self):
-        import db as db_module
         import typing
+
+        import db as db_module
         self.assertIn("Tuple", db_module.__dict__)
         hints = typing.get_type_hints(db_module.Database.get_injuries)
         self.assertIn("return", hints)
@@ -1805,12 +1803,12 @@ class TestRegressionFixes(unittest.TestCase):
     def test_cache_ttl_max_age(self):
         # Schedule with max_age_hours
         with patch.object(self.db, "get_schedule", return_value=[{"date": "2026-10-18"}]) as mock_sched:
-            sched = self.client.get_upcoming_schedule()
+            self.client.get_upcoming_schedule()
             mock_sched.assert_called_once_with(max_age_hours=3.0)
 
         # Injuries with max_age_hours
         with patch.object(self.db, "get_injuries", return_value={}) as mock_inj:
-            inj = self.client.get_injuries()
+            self.client.get_injuries()
             mock_inj.assert_called_once_with(max_age_hours=3.0)
 
     # 4. Expanded ESPN injury statuses
@@ -1926,7 +1924,7 @@ class TestRegressionFixes(unittest.TestCase):
         with patch("sys.argv", test_args), \
              patch("sys.stdout", buf), \
              patch("main.NHLClient") as mock_client_cls, \
-             patch("main.Database") as mock_db_cls, \
+             patch("main.Database"), \
              patch("main.collect_slate_skaters", return_value=(cands, [], [], 0, 0, set())), \
              patch("main.build_skater_projection", return_value=(0.0, 0.0)):
             mock_client = mock_client_cls.return_value
@@ -3032,6 +3030,7 @@ class TestImageParser(unittest.TestCase):
 
     def test_prepare_image_inverts_dark_screenshots(self):
         from PIL import Image
+
         from image_parser import TesseractOCR
 
         dark = Image.new("L", (200, 100), color=20)

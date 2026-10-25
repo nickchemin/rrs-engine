@@ -7,12 +7,12 @@ screenshots and synchronizes them to boosters.txt and SQLite database.
 """
 
 import os
-import sys
 import re
 import shutil
+import sys
 import unicodedata
 from collections import Counter
-from typing import List, Dict, Tuple, Optional, Any, Set, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat
@@ -196,6 +196,7 @@ class VisionAPIOCR(OCRBackend):
         if not self.endpoint_url:
             raise RuntimeError("VISION_API_URL is not set.")
         import base64
+
         import requests
 
         with open(image_path, "rb") as f:
@@ -296,12 +297,11 @@ def extract_booster_candidates_from_text(raw_text: str) -> List[Dict[str, Any]]:
     ]
     """
     candidates: List[Dict[str, Any]] = []
-    lines = [clean_line_text(l) for l in raw_text.splitlines() if clean_line_text(l)]
+    lines = [clean_line_text(line) for line in raw_text.splitlines() if clean_line_text(line)]
     if not lines:
         return candidates
 
     # Regex patterns
-    booster_re = re.compile(r'(?:booster:?\s*)?(?:\+)?(\d+(?:[.,]\d+)?)\s*([x%])?', re.IGNORECASE)
     team_pos_re = re.compile(
         r'\b([A-Z]{2,4})\b\s*[\-•\s]+\b(C|LW|RW|L|R|D|DEF|F|G)\b|\b(C|LW|RW|L|R|D|DEF|F|G)\b\s*[\-•\s]+\b([A-Z]{2,4})\b',
         re.IGNORECASE
@@ -656,11 +656,11 @@ def handle_parse_images(
     """
     from main import (
         BOOSTERS_FILE,
+        collect_slate_skaters,
         load_boosters_file,
+        nhl_today,
         save_boosters_file,
         sync_boosters_to_db,
-        collect_slate_skaters,
-        nhl_today
     )
 
     target_boosters_file = boosters_path or BOOSTERS_FILE

@@ -1,23 +1,23 @@
-import os
-import sys
-import re
 import argparse
+import os
+import re
+import sys
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Tuple, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from db import Database
-from nhl_api import NHLClient, nhl_today
 from model import (
-    PerformancePredictor,
     POS_AVERAGES,
-    evaluate_model,
-    calibrate_rrs_formula,
-    calculate_xrrs_projection,
+    PerformancePredictor,
     calculate_rrs_from_stats,
-    compute_line_factor
+    calculate_xrrs_projection,
+    calibrate_rrs_formula,
+    compute_line_factor,
+    evaluate_model,
 )
+from nhl_api import NHLClient, nhl_today
 
 # Ensure UTF-8 output on Windows console
 if sys.platform == "win32":
@@ -30,14 +30,26 @@ if sys.platform == "win32":
 from optimizer import (
     SLOT_BOOSTS,
     assign_slots,
+    build_lineup_correlation_matrix,
+    compute_pair_correlation,
     compute_pair_synergy,
+    print_lineup_table,
+    simulate_lineup_distribution,
     solve_optimal_lineup,
     solve_stacked_lineup,
-    print_lineup_table,
-    compute_pair_correlation,
-    build_lineup_correlation_matrix,
-    simulate_lineup_distribution
 )
+
+__all__ = [
+    "SLOT_BOOSTS",
+    "assign_slots",
+    "build_lineup_correlation_matrix",
+    "compute_pair_correlation",
+    "compute_pair_synergy",
+    "print_lineup_table",
+    "simulate_lineup_distribution",
+    "solve_optimal_lineup",
+    "solve_stacked_lineup",
+]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOOSTERS_FILE = os.path.join(BASE_DIR, "boosters.txt")
@@ -888,8 +900,6 @@ def settle_past_lineups(client: NHLClient, db: Database):
             a = float(match.get("assists", 0))
             s = float(match.get("shots", 0))
             toi_str = match.get("toi", "00:00")
-            p_info = players_map.get(p_id, {})
-            pos = p_info.get("position") or match.get("positionCode") or "F"
             blk = float(match.get("blockedShots", 0.0) or 0.0)
 
             today_dt = datetime.strptime(today_str, "%Y-%m-%d")
@@ -1124,7 +1134,7 @@ def build_skater_projection(
 ) -> Tuple[float, float]:
     if today_str is None:
         today_str = nhl_today()
-    train_logs = [l for l in logs if l.get("gameDate", "") < game_date]
+    train_logs = [log for log in logs if log.get("gameDate", "") < game_date]
     if train_logs:
         predictor = PerformancePredictor(scoring_weights=scoring_weights)
         predictor.train(train_logs, standings)

@@ -1,19 +1,21 @@
-import requests
 import json
 import logging
+import os
 import random
 import re
-import os
 import threading
-import unicodedata
 import time
+import unicodedata
 from collections.abc import Mapping
-from datetime import datetime, timezone, timedelta, tzinfo
-from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib3.util.retry import Retry
+from datetime import datetime, timedelta, tzinfo
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 from requests.adapters import HTTPAdapter
-from db import Database, season_from_date, TeamLines
+from urllib3.util.retry import Retry
+
+from db import Database, TeamLines, season_from_date
 
 logger = logging.getLogger(__name__)
 

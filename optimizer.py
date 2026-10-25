@@ -5,9 +5,9 @@ Features vectorised Monte-Carlo covariance simulation for Floor and Ceiling dist
 """
 
 from collections import Counter
-from typing import Dict, List, Any, Tuple, Optional
-import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 
 SLOT_BOOSTS: List[float] = [2.0, 1.8, 1.6, 1.4, 1.2]
 
