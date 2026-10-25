@@ -213,7 +213,7 @@ class PerformancePredictor:
         standings: Dict[str, Dict[str, float]]
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         if len(game_logs) < 6:
-            return np.empty((0, 19)), {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")}
+            return np.empty((0, 14)), {k: np.empty(0) for k in ("goals", "assists", "shots", "toi")}
 
         parsed = []
         for g in game_logs:
@@ -224,10 +224,7 @@ class PerformancePredictor:
                 "shots": float(g.get("shots", 0)),
                 "toi": parse_toi(g.get("toi", "00:00")),
                 "is_home": 1.0 if (g.get("homeRoadFlag") == "H" or g.get("is_home") in (1, True)) else 0.0,
-                "opp": g.get("opponentAbbrev", ""),
-                "is_b2b": float(g.get("is_b2b", 0)),
-                "rest_days": float(g.get("rest_days", 2.0)),
-                "opp_is_b2b": float(g.get("opp_is_b2b", 0))
+                "opp": g.get("opponentAbbrev", "")
             })
 
         X_rows = []
@@ -235,22 +232,9 @@ class PerformancePredictor:
 
         for i in range(5, len(parsed)):
             curr = parsed[i]
-            prev = parsed[i - 1]
-
-            try:
-                d_curr = datetime.strptime(curr["date"], "%Y-%m-%d")
-                d_prev = datetime.strptime(prev["date"], "%Y-%m-%d")
-                rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
-            except Exception:
-                rest = float(curr.get("rest_days", 2.0))
-
-            is_b2b = 1.0 if rest <= 1.0 else float(curr.get("is_b2b", 0.0))
-            opp_is_b2b = float(curr.get("opp_is_b2b", 0.0))
 
             opp_info = standings.get(curr["opp"], {})
             opp_def = float(opp_info.get("defense_factor", 1.0))
-            opp_pk = float(opp_info.get("pk_pct", 0.80))
-            opp_ts = float(opp_info.get("times_shorthanded_per_game", 3.0))
 
             last5 = parsed[max(0, i - 5):i]
             last20 = parsed[max(0, i - 20):i]
@@ -270,12 +254,7 @@ class PerformancePredictor:
                 np.mean([x["shots"] for x in career]),
                 np.mean([x["toi"] for x in career]),
                 curr["is_home"],
-                rest,
-                opp_def,
-                is_b2b,
-                opp_is_b2b,
-                opp_pk,
-                opp_ts
+                opp_def
             ]
 
             X_rows.append(feat)
@@ -380,8 +359,8 @@ class PerformancePredictor:
         ts_val = float(opp_times_shorthanded if opp_times_shorthanded is not None else opp_info.get("times_shorthanded_per_game", 3.0))
 
         home_boost = 1.05 if is_home else 0.95
-        # Fatigue penalty / boost
-        fatigue_mult = 0.96 if is_b2b else 1.0
+        effective_b2b = bool(is_b2b) or (rest_days is not None and float(rest_days) <= 1.0)
+        fatigue_mult = 0.96 if effective_b2b else 1.0
         if opp_is_b2b:
             fatigue_mult *= 1.03
 
@@ -404,20 +383,6 @@ class PerformancePredictor:
                 "toi": parse_toi(g.get("toi", "00:00"))
             } for g in game_logs]
 
-            last = parsed[-1]
-            if rest_days is not None:
-                rest = min(5.0, max(0.0, float(rest_days)))
-            else:
-                try:
-                    d_curr = datetime.strptime(game_date, "%Y-%m-%d")
-                    d_prev = datetime.strptime(last["date"], "%Y-%m-%d")
-                    rest = min(5.0, max(0.0, float((d_curr - d_prev).days)))
-                except Exception:
-                    rest = 2.0
-
-            eff_is_b2b = 1.0 if (is_b2b or rest <= 1.0) else 0.0
-            eff_opp_is_b2b = 1.0 if opp_is_b2b else 0.0
-
             last5 = parsed[-5:] if len(parsed) >= 5 else parsed
             last20 = parsed[-20:] if len(parsed) >= 20 else parsed
 
@@ -435,12 +400,7 @@ class PerformancePredictor:
                 np.mean([x["shots"] for x in parsed]),
                 np.mean([x["toi"] for x in parsed]),
                 1.0 if is_home else 0.0,
-                rest,
-                opp_def,
-                eff_is_b2b,
-                eff_opp_is_b2b,
-                pk_val,
-                ts_val
+                opp_def
             ]], dtype=np.float64)
 
             preds = {}
@@ -469,9 +429,9 @@ class PerformancePredictor:
 
             if not preds and self.trained and self.multi_model is not None:
                 # Multi-output Ridge prediction
-                # If trained on 19 features, use full vector; if legacy 15 features, slice
-                p_dim = self.multi_model.coef_.shape[0] if self.multi_model.coef_ is not None else 19
-                in_vec = x_vec if p_dim == 19 else x_vec[:, :15]
+                coef = getattr(self.multi_model, "coef_", None)
+                p_dim = coef.shape[0] if coef is not None else x_vec.shape[1]
+                in_vec = x_vec[:, :p_dim] if isinstance(p_dim, int) and p_dim < x_vec.shape[1] else x_vec
                 raw_preds = self.multi_model.predict(in_vec)[0]
                 preds["goals"] = max(0.0, float(raw_preds[0]) * fatigue_mult)
                 preds["assists"] = max(0.0, float(raw_preds[1]) * fatigue_mult)
@@ -494,9 +454,9 @@ class PerformancePredictor:
             else:
                 adj_g, adj_a, adj_s, adj_toi = r5_g, r5_a, r5_s, r5_toi
 
-            base_g = max(0.0, adj_g * opp_def * home_boost * fatigue_mult)
-            base_a = max(0.0, adj_a * opp_def * home_boost * fatigue_mult)
-            base_s = max(0.0, adj_s * opp_def * home_boost * fatigue_mult)
+            base_g = max(0.0, adj_g * fatigue_mult)
+            base_a = max(0.0, adj_a * fatigue_mult)
+            base_s = max(0.0, adj_s * fatigue_mult)
             base_toi = max(5.0, adj_toi)
 
             if preds:

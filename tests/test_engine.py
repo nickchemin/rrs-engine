@@ -2310,6 +2310,34 @@ class TestPhase1FeatureEngineering(unittest.TestCase):
         self.assertLess(a_elite, a_base)
         self.assertLess(toi_elite, toi_base)
 
+    def test_feature_vector_excludes_context_duplicates(self):
+        predictor = PerformancePredictor()
+        logs = [
+            {"gameDate": f"2026-10-{i:02d}", "goals": 0, "assists": 0, "shots": 1, "toi": "15:00"}
+            for i in range(1, 21)
+        ]
+        X, _ = predictor._extract_dataset(logs, {})
+        self.assertEqual(X.shape[1], 14)
+
+    def test_fatigue_multiplier_is_not_double_counted(self):
+        predictor = PerformancePredictor()
+        logs = [
+            {"gameDate": f"2026-10-{i:02d}", "goals": 0.5, "assists": 0.5, "shots": 2, "toi": "18:00"}
+            for i in range(1, 11)
+        ]
+        standings = {"CGY": {"defense_factor": 1.0}}
+        normal = predictor.predict(
+            logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20", standings=standings
+        )
+        fatigued = predictor.predict(
+            logs, is_home=True, opponent_abbrev="CGY", game_date="2026-10-20",
+            standings=standings, is_b2b=True,
+        )
+
+        self.assertAlmostEqual(fatigued["xG"], normal["xG"] * 0.96, places=2)
+        self.assertAlmostEqual(fatigued["xA"], normal["xA"] * 0.96, places=2)
+        self.assertAlmostEqual(fatigued["xSOG"], normal["xSOG"] * 0.96, places=2)
+
     def test_performance_predictor_poisson_glm_and_fatigue(self):
         predictor = PerformancePredictor(model_type="poisson")
         logs = []
