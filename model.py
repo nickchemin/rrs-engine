@@ -845,14 +845,13 @@ def evaluate_model(
         print("No players found in database.")
         return
 
-    pit_standings = {} if point_in_time else (standings or {})
-
     actuals = {"goals": [], "assists": [], "shots": [], "toi": []}
     preds_base = {"goals": [], "assists": [], "shots": [], "toi": []}
     preds_ridge = {"goals": [], "assists": [], "shots": [], "toi": []}
     preds_glm = {"goals": [], "assists": [], "shots": [], "toi": []}
 
     tested_players = 0
+    pit_available = False
 
     for p in players:
         p_id = p["player_id"]
@@ -864,12 +863,20 @@ def evaluate_model(
         train_logs = logs[:split]
         test_logs = logs[split:]
 
+        if point_in_time:
+            cutoff = train_logs[-1].get("gameDate", "") if train_logs else ""
+            player_standings = db.get_standings_as_of(cutoff) if hasattr(db, "get_standings_as_of") else {}
+        else:
+            player_standings = standings or {}
+        if player_standings:
+            pit_available = True
+
         # Train both Classic (Ridge) and New (Poisson/GLM) pipelines on strict historical train logs
         model_ridge = PerformancePredictor(model_type="ridge")
-        model_ridge.train(train_logs, pit_standings)
+        model_ridge.train(train_logs, player_standings)
 
         model_glm = PerformancePredictor(model_type="poisson")
-        model_glm.train(train_logs, pit_standings)
+        model_glm.train(train_logs, player_standings)
 
         for i, test_game in enumerate(test_logs):
             history = logs[:split + i]
@@ -886,7 +893,7 @@ def evaluate_model(
                 is_home=is_h,
                 opponent_abbrev=opp,
                 game_date=g_date,
-                standings=pit_standings,
+                standings=player_standings,
                 position=pos,
                 is_b2b=is_b2b_val,
                 rest_days=rest_val,
@@ -898,7 +905,7 @@ def evaluate_model(
                 is_home=is_h,
                 opponent_abbrev=opp,
                 game_date=g_date,
-                standings=pit_standings,
+                standings=player_standings,
                 position=pos,
                 is_b2b=is_b2b_val,
                 rest_days=rest_val,
@@ -983,11 +990,14 @@ def evaluate_model(
         sp_glm[t] = calc_spearman(y_act, y_g)
 
     print("-" * 75)
-    leak_note = (
-        "Opponent standings neutralized (no as-of standings)"
-        if point_in_time
-        else "End-of-season standings (with look-ahead)"
-    )
+    if point_in_time:
+        leak_note = (
+            "Standings as of the training cutoff"
+            if pit_available
+            else "Opponent standings neutralized (no as-of standings)"
+        )
+    else:
+        leak_note = "End-of-season standings (with look-ahead)"
     print(f"Validation Results: {tested_players} players, {len(actuals['goals'])} test games [{leak_note}]:")
     print(f"  Goals (MAE):    {mae_glm['goals']:.3f} per game  (Baseline 20-game avg: {mae_base['goals']:.3f})")
     print(f"  Assists (MAE):  {mae_glm['assists']:.3f} per game  (Baseline 20-game avg: {mae_base['assists']:.3f})")

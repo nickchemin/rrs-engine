@@ -145,6 +145,20 @@ class Database:
                     updated_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS standings_history (
+                    team TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ga_per_game REAL NOT NULL,
+                    defense_factor REAL NOT NULL,
+                    pk_pct REAL NOT NULL,
+                    times_shorthanded_per_game REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (team, snapshot_date)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_standings_history_date
+                    ON standings_history(snapshot_date);
+
                 CREATE TABLE IF NOT EXISTS schedule (
                     game_id INTEGER PRIMARY KEY,
                     date TEXT NOT NULL,
@@ -395,11 +409,17 @@ class Database:
                 } for r in rows
             }
 
-    def save_standings(self, metrics: Dict[str, Dict[str, float]]):
+    def save_standings(self, metrics: Dict[str, Dict[str, float]], snapshot_date: Optional[str] = None):
         now = time.time()
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
         with self._get_connection() as conn:
             cur = conn.cursor()
             for team, data in metrics.items():
+                ga_per_game = _as_float(data.get("ga_per_game"), 3.0)
+                defense_factor = _as_float(data.get("defense_factor"), 1.0)
+                pk_pct = _as_float(data.get("pk_pct"), 0.80)
+                times_shorthanded = _as_float(data.get("times_shorthanded_per_game"), 3.0)
+
                 cur.execute("""
                     INSERT INTO standings (team, ga_per_game, defense_factor, pk_pct, times_shorthanded_per_game, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -409,15 +429,47 @@ class Database:
                         pk_pct=excluded.pk_pct,
                         times_shorthanded_per_game=excluded.times_shorthanded_per_game,
                         updated_at=excluded.updated_at
-                """, (
-                    team,
-                    _as_float(data.get("ga_per_game"), 3.0),
-                    _as_float(data.get("defense_factor"), 1.0),
-                    _as_float(data.get("pk_pct"), 0.80),
-                    _as_float(data.get("times_shorthanded_per_game"), 3.0),
-                    now
-                ))
+                """, (team, ga_per_game, defense_factor, pk_pct, times_shorthanded, now))
+
+                cur.execute("""
+                    INSERT INTO standings_history (
+                        team, snapshot_date, ga_per_game, defense_factor, pk_pct,
+                        times_shorthanded_per_game, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(team, snapshot_date) DO UPDATE SET
+                        ga_per_game=excluded.ga_per_game,
+                        defense_factor=excluded.defense_factor,
+                        pk_pct=excluded.pk_pct,
+                        times_shorthanded_per_game=excluded.times_shorthanded_per_game,
+                        updated_at=excluded.updated_at
+                """, (team, snapshot, ga_per_game, defense_factor, pk_pct, times_shorthanded, now))
             conn.commit()
+
+    def get_standings_as_of(self, game_date: str) -> Dict[str, Dict[str, float]]:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT h.team, h.ga_per_game, h.defense_factor, h.pk_pct,
+                       h.times_shorthanded_per_game
+                FROM standings_history h
+                JOIN (
+                    SELECT team, MAX(snapshot_date) AS snapshot_date
+                    FROM standings_history
+                    WHERE snapshot_date <= ?
+                    GROUP BY team
+                ) latest
+                  ON latest.team = h.team AND latest.snapshot_date = h.snapshot_date
+            """, (game_date,))
+            rows = cur.fetchall()
+        return {
+            r["team"]: {
+                "ga_per_game": float(r["ga_per_game"]),
+                "defense_factor": float(r["defense_factor"]),
+                "pk_pct": float(r["pk_pct"]),
+                "times_shorthanded_per_game": float(r["times_shorthanded_per_game"]),
+            }
+            for r in rows
+        }
 
     # --- Schedule ---
     def get_schedule(self, max_age_hours: float = 3.0) -> List[Dict[str, Any]]:

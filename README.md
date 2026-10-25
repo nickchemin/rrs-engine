@@ -110,6 +110,9 @@ local cache. Older historical dates require previously synced data.
 - The tournament simulation uses a configured correlation matrix and
   role-based coefficients of variation. Its quantiles are model output, not
   empirical guarantees.
+- The backtest uses standings snapshots recorded during sync. When no snapshot
+  exists for a cutoff date, opponent features are neutralized and the report
+  says so.
 - Settlement estimates actual scores from boxscore events. When app payouts
   are recorded with `--record`, those values take precedence for calibration.
 

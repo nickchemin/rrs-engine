@@ -2460,6 +2460,15 @@ class TestModelFeatures(unittest.TestCase):
                 "toi_minutes": 18.0
             })
         self.db.save_game_logs(88, logs)
+        self.db.save_standings(
+            {"CHI": {
+                "ga_per_game": 3.0,
+                "defense_factor": 1.0,
+                "pk_pct": 0.80,
+                "times_shorthanded_per_game": 3.0,
+            }},
+            snapshot_date="2025-10-20",
+        )
 
         buf = io.StringIO()
         with patch("sys.stdout", buf):
@@ -2469,6 +2478,7 @@ class TestModelFeatures(unittest.TestCase):
         self.assertIn("20-Game Baseline", out)
         self.assertIn("Classic (Ridge)", out)
         self.assertIn("New (Poisson GLM)", out)
+        self.assertIn("Standings as of the training cutoff", out)
         self.assertEqual(results["players"], 1)
         self.assertGreater(results["test_games"], 0)
         self.assertIn("mae", results["metrics"]["glm"]["goals"])
@@ -3499,6 +3509,32 @@ class TestDatabasePersistence(unittest.TestCase):
 
         self.db.save_model_params({"goals": 2.0})
         self.assertEqual(self.db.get_model_params(), {"goals": 2.0})
+
+    def test_standings_snapshots_support_as_of_lookup(self):
+        self.db.save_standings(
+            {"COL": {
+                "ga_per_game": 3.0,
+                "defense_factor": 1.0,
+                "pk_pct": 0.80,
+                "times_shorthanded_per_game": 3.0,
+            }},
+            snapshot_date="2026-10-10",
+        )
+        self.db.save_standings(
+            {"COL": {
+                "ga_per_game": 2.0,
+                "defense_factor": 0.8,
+                "pk_pct": 0.85,
+                "times_shorthanded_per_game": 2.5,
+            }},
+            snapshot_date="2026-10-20",
+        )
+
+        early = self.db.get_standings_as_of("2026-10-15")
+        self.assertEqual(early["COL"]["ga_per_game"], 3.0)
+        late = self.db.get_standings_as_of("2026-10-25")
+        self.assertEqual(late["COL"]["ga_per_game"], 2.0)
+        self.assertEqual(self.db.get_standings_as_of("2026-10-01"), {})
 
     def test_writes_accept_missing_numeric_values(self):
         self.db.save_player(7003, "Test Skater Three", team="COL", position="C")
