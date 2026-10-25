@@ -20,6 +20,7 @@ from model import (
 )
 from nhl_api import NHLClient, nhl_today
 from paths import boosters_path, migrate_legacy_files
+from slate import build_team_matchups, select_game_day
 
 # Ensure UTF-8 output on Windows console
 if sys.platform == "win32":
@@ -785,13 +786,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
         print("Schedule is currently unavailable.")
         return []
 
-    if not target_date:
-        today_str = nhl_today()
-        today_day = next((d for d in schedule if d["date"] == today_str and d.get("games")), None)
-        if not today_day:
-            today_day = next((d for d in schedule if d["date"] >= today_str and d.get("games")), None)
-    else:
-        today_day = next((d for d in schedule if d["date"] == target_date and d.get("games")), None)
+    today_day = select_game_day(schedule, target_date, nhl_today())
 
     if not today_day:
         print("No scheduled games found.")
@@ -801,11 +796,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
     games = today_day.get("games", [])
     print(f"Game Day: {game_date} ({len(games)} matches)")
 
-    team_matchups = {}
-    for g in games:
-        home, away = g["homeTeam"], g["awayTeam"]
-        team_matchups[home] = (away, True)
-        team_matchups[away] = (home, False)
+    team_matchups = build_team_matchups(games)
 
     injuries = client.get_injuries(force=force)
     goalies = client.get_starting_goalies(games=games, force=force)
@@ -1375,13 +1366,7 @@ def main():
         print("Schedule is unavailable.")
         return
 
-    if not args.date:
-        today_str = nhl_today()
-        target_day = next((d for d in schedule if d["date"] == today_str and d.get("games")), None)
-        if not target_day:
-            target_day = next((d for d in schedule if d["date"] >= today_str and d.get("games")), None)
-    else:
-        target_day = next((d for d in schedule if d["date"] == args.date and d.get("games")), None)
+    target_day = select_game_day(schedule, args.date, nhl_today())
 
     if not target_day:
         print(f"No games found for date: {args.date or 'today'}")
@@ -1390,11 +1375,7 @@ def main():
     game_date = target_day["date"]
     games = target_day.get("games", [])
 
-    team_matchups = {}
-    for g in games:
-        home, away = g["homeTeam"], g["awayTeam"]
-        team_matchups[home] = (away, True)
-        team_matchups[away] = (home, False)
+    team_matchups = build_team_matchups(games)
 
     # 3. Collect and predict for all active players in today's games
     injuries = client.get_injuries()

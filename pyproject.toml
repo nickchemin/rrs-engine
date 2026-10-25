@@ -48,6 +48,7 @@ source = [
     "nhl_api",
     "optimizer",
     "paths",
+    "slate",
 ]
 
 [tool.coverage.report]

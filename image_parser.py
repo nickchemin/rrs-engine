@@ -14,6 +14,8 @@ import unicodedata
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from slate import build_team_matchups, cached_player_row, select_game_day
+
 try:
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat
 except ImportError:
@@ -631,16 +633,6 @@ def print_ocr_summary_table(matches: List[Dict[str, Any]]):
 # CLI Orchestrator Entrypoint
 # ==============================================================================
 
-def _cached_player_row(player: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": player.get("name", ""),
-        "team": player.get("team") or "",
-        "pos": player.get("pos") or player.get("position") or "F",
-        "id": player.get("player_id"),
-        "is_duplicate": False,
-    }
-
-
 def handle_parse_images(
     folder_path: str,
     client: Any,
@@ -679,37 +671,24 @@ def handle_parse_images(
     if not schedule:
         print("Schedule unavailable; querying historical players from database.")
         all_players = db.get_all_players()
-        slate_skaters = [_cached_player_row(p) for p in all_players]
+        slate_skaters = [cached_player_row(p) for p in all_players]
         active_skaters = slate_skaters
         dtd_skaters = []
         depth_skaters = []
     else:
-        if not target_date:
-            today_str = nhl_today()
-            target_day = next((d for d in schedule if d["date"] == today_str and d.get("games")), None)
-            if not target_day:
-                target_day = next((d for d in schedule if d["date"] >= today_str and d.get("games")), None)
-        else:
-            target_day = next((d for d in schedule if d["date"] == target_date and d.get("games")), None)
+        target_day = select_game_day(schedule, target_date, nhl_today())
 
         if not target_day:
             print(f"No games found for date: {target_date or 'today'}. Using cached players.")
             all_players = db.get_all_players()
-            slate_skaters = [
-                {"name": p["name"], "team": p["team"], "pos": p["pos"], "id": p["player_id"], "is_duplicate": False}
-                for p in all_players
-            ]
+            slate_skaters = [cached_player_row(p) for p in all_players]
             active_skaters = slate_skaters
             dtd_skaters = []
             depth_skaters = []
         else:
             game_date = target_day["date"]
             games = target_day.get("games", [])
-            team_matchups = {}
-            for g in games:
-                home, away = g["homeTeam"], g["awayTeam"]
-                team_matchups[home] = (away, True)
-                team_matchups[away] = (home, False)
+            team_matchups = build_team_matchups(games)
 
             injuries = client.get_injuries()
             goalies = client.get_starting_goalies(games=games)

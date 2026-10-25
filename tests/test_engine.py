@@ -76,6 +76,7 @@ from nhl_api import (
     nhl_today,
 )
 from optimizer import build_lineup_correlation_matrix, compute_pair_correlation, simulate_lineup_distribution
+from slate import build_team_matchups, cached_player_row, select_game_day
 
 
 class TestTimezoneAndDates(unittest.TestCase):
@@ -3539,6 +3540,31 @@ class TestBoosterFilePersistence(unittest.TestCase):
             self.assertIn("active guy", reloaded)
         finally:
             os.remove(path)
+
+
+class TestSlateHelpers(unittest.TestCase):
+    def test_build_team_matchups(self):
+        games = [{"homeTeam": "EDM", "awayTeam": "CGY"}]
+        self.assertEqual(
+            build_team_matchups(games),
+            {"EDM": ("CGY", True), "CGY": ("EDM", False)},
+        )
+
+    def test_select_game_day_prefers_today_then_next(self):
+        schedule = [
+            {"date": "2026-10-19", "games": []},
+            {"date": "2026-10-20", "games": [{"id": 1}]},
+            {"date": "2026-10-21", "games": [{"id": 2}]},
+        ]
+        self.assertEqual(select_game_day(schedule, "2026-10-21", "2026-10-20")["date"], "2026-10-21")
+        self.assertEqual(select_game_day(schedule, "", "2026-10-19")["date"], "2026-10-20")
+        self.assertIsNone(select_game_day(schedule, "2026-10-25", "2026-10-20"))
+
+    def test_cached_player_row_uses_position_column(self):
+        row = cached_player_row({"name": "Test", "team": None, "position": "C", "player_id": 5})
+        self.assertEqual(row["pos"], "C")
+        self.assertEqual(row["team"], "")
+        self.assertEqual(row["id"], 5)
 
 
 class TestDataPaths(unittest.TestCase):
