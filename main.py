@@ -354,6 +354,12 @@ def save_boosters_file(
         except Exception:
             pass
 
+    old_names = set()
+    for section in old_sections.values():
+        for line in section:
+            if "=" in line and not line.lstrip().startswith("#"):
+                old_names.add(name_key(line.split("=", 1)[0]))
+
     lines = [
         "# Real Sports NHL - Player Boosters",
         "# Format: Player Name = Booster (e.g. Matt Boldy = 0.8)",
@@ -457,6 +463,22 @@ def save_boosters_file(
     for team in missing_teams:
         lines.extend(old_sections[team])
         lines.append("")
+
+    slate_names = {name_key(p.get("name", "")) for p in all_skaters}
+    preserved = {}
+    for name, value in boosters.items():
+        base = name_key(name.split(" (", 1)[0])
+        if value and base not in slate_names and base not in old_names:
+            preserved[name] = value
+    if preserved:
+        lines.extend([
+            "",
+            f"# {'=' * 78}",
+            "# Preserved entries (not on the current slate)",
+            f"# {'=' * 78}",
+        ])
+        for name in sorted(preserved):
+            lines.append(f"{name:<24} = {preserved[name]:g}")
 
     with open(target_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")

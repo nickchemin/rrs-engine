@@ -3280,6 +3280,25 @@ class TestDatabasePersistence(unittest.TestCase):
         self.assertEqual(goalies["COL"]["gaa"], 3.0)
 
 
+class TestBoosterFilePersistence(unittest.TestCase):
+    def test_preserves_entries_outside_the_slate(self):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("out guy (c) = 1.5  # BOS C\n")
+            boosters = load_boosters_file(path)
+            active = [{"id": 1, "name": "Active Guy", "team": "COL", "pos": "C", "xRRS": 4.0}]
+
+            save_boosters_file(boosters, active, path=path)
+
+            reloaded = load_boosters_file(path)
+            self.assertEqual(reloaded.get("out guy (C)"), 1.5)
+            self.assertIn("active guy", reloaded)
+        finally:
+            os.remove(path)
+
+
 if __name__ == "__main__":
     unittest.main()
 
