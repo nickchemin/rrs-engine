@@ -2892,6 +2892,43 @@ class TestPhase4ImageParserAndOCR(unittest.TestCase):
         self.assertEqual(db_boosters.get("nathan mackinnon"), 0.4)
         self.assertEqual(db_boosters.get("cale makar"), 1.2)
 
+    def test_handle_parse_images_uses_cached_players_offline(self):
+        from image_parser import handle_parse_images
+        img = os.path.join(self.tmp_dir, "screen.png")
+        with open(img, "wb") as f:
+            f.write(b"DUMMY_IMAGE")
+        cached = [{"name": "Cached Player", "team": None, "position": "C", "player_id": 42}]
+
+        with patch.object(self.client, "get_upcoming_schedule", return_value=[]), \
+                patch.object(self.db, "get_all_players", return_value=cached), \
+                patch("image_parser.parse_images_directory", return_value=({}, [])) as parse:
+            res = handle_parse_images(
+                self.tmp_dir,
+                self.client,
+                self.db,
+                boosters_path=self.boosters_path,
+            )
+
+        self.assertEqual(res, {})
+        slate = parse.call_args.args[1]
+        self.assertEqual(slate[0]["pos"], "C")
+        self.assertEqual(slate[0]["team"], "")
+
+    def test_ocr_summary_handles_missing_team(self):
+        from image_parser import print_ocr_summary_table
+        matches = [{
+            "name": "Test Player",
+            "team": None,
+            "pos": "C",
+            "booster": 0.4,
+            "confidence": 95.0,
+            "source_image": "a.png",
+        }]
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            print_ocr_summary_table(matches)
+        self.assertIn("Test Player", buf.getvalue())
+
     def test_cli_parse_images_mutually_exclusive_with_sync(self):
         from main import main as main_entry
         test_args = ["main.py", "--parse-images", "some_folder", "--sync"]

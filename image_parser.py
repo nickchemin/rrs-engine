@@ -572,7 +572,7 @@ def parse_images_directory(
         detailed_matches.append(rec)
 
     # Sort detailed matches alphabetically by player name
-    detailed_matches.sort(key=lambda x: x["name"])
+    detailed_matches.sort(key=lambda x: x.get("name") or "")
     return detected_boosters, detailed_matches
 
 
@@ -590,12 +590,15 @@ def print_ocr_summary_table(matches: List[Dict[str, Any]]):
     print("-" * 80)
 
     for m in matches:
+        name = m.get("name") or "-"
+        team = m.get("team") or "-"
+        pos = m.get("pos") or "-"
         b_str = f"+{m['booster']:g}" if m['booster'] > 0 else f"{m['booster']:g}"
         conf_str = f"{m['confidence']:.0f}%"
         src = m['source_image']
         if len(src) > 20:
             src = src[:17] + "..."
-        print(f"{m['name']:<26} {m['team']:<6} {m['pos']:<5} {b_str:<10} {conf_str:<8} {src:<20}")
+        print(f"{name:<26} {team:<6} {pos:<5} {b_str:<10} {conf_str:<8} {src:<20}")
 
     print("-" * 80)
     print(f"Total matched players: {len(matches)}")
@@ -605,6 +608,16 @@ def print_ocr_summary_table(matches: List[Dict[str, Any]]):
 # ==============================================================================
 # CLI Orchestrator Entrypoint
 # ==============================================================================
+
+def _cached_player_row(player: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": player.get("name", ""),
+        "team": player.get("team") or "",
+        "pos": player.get("pos") or player.get("position") or "F",
+        "id": player.get("player_id"),
+        "is_duplicate": False,
+    }
+
 
 def handle_parse_images(
     folder_path: str,
@@ -644,10 +657,7 @@ def handle_parse_images(
     if not schedule:
         print("Schedule unavailable; querying historical players from database.")
         all_players = db.get_all_players()
-        slate_skaters = [
-            {"name": p["name"], "team": p["team"], "pos": p["pos"], "id": p["player_id"], "is_duplicate": False}
-            for p in all_players
-        ]
+        slate_skaters = [_cached_player_row(p) for p in all_players]
         active_skaters = slate_skaters
         dtd_skaters = []
         depth_skaters = []
