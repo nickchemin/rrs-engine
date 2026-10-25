@@ -2,6 +2,15 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.6.2] - 2026-10-26
+
+### Changed
+- Poisson models now fit events per 60 minutes with time-on-ice exposure and convert rates back to per-game counts.
+- Backtests use standings snapshots from the training cutoff instead of end-of-season values.
+
+### Added
+- `standings_history` snapshots and `Database.get_standings_as_of()`.
+
 ## [2.6.1] - 2026-10-26
 
 ### Added
