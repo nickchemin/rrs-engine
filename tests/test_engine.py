@@ -2943,6 +2943,19 @@ class TestPhase4ImageParserAndOCR(unittest.TestCase):
             print_ocr_summary_table(matches)
         self.assertIn("Test Player", buf.getvalue())
 
+    def test_prepare_image_inverts_dark_screenshots(self):
+        from PIL import Image
+        from image_parser import TesseractOCR
+
+        dark = Image.new("L", (200, 100), color=20)
+        self.assertGreater(TesseractOCR._prepare_image(dark).resize((1, 1)).getpixel((0, 0)), 110)
+
+        bright = Image.new("L", (200, 100), color=220)
+        self.assertGreater(TesseractOCR._prepare_image(bright).resize((1, 1)).getpixel((0, 0)), 110)
+
+        wide = Image.new("L", (3200, 1000), color=200)
+        self.assertLessEqual(max(TesseractOCR._prepare_image(wide).size), 3000)
+
     def test_cli_parse_images_mutually_exclusive_with_sync(self):
         from main import main as main_entry
         test_args = ["main.py", "--parse-images", "some_folder", "--sync"]

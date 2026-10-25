@@ -15,11 +15,13 @@ from collections import Counter
 from typing import List, Dict, Tuple, Optional, Any, Set, Union, Callable
 
 try:
-    from PIL import Image, ImageEnhance, ImageFilter
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat
 except ImportError:
     Image = None
     ImageEnhance = None
     ImageFilter = None
+    ImageOps = None
+    ImageStat = None
 
 try:
     import pytesseract
@@ -109,6 +111,27 @@ class TesseractOCR(OCRBackend):
             return False
         return True
 
+    @staticmethod
+    def _prepare_image(img: Any) -> Any:
+        if img.width * img.height > 40_000_000:
+            raise RuntimeError(f"Image is too large: {img.width}x{img.height}")
+
+        gray = img.convert("L")
+        longest = max(gray.size)
+        if longest > 3000:
+            ratio = 3000.0 / longest
+            gray = gray.resize(
+                (max(1, int(gray.width * ratio)), max(1, int(gray.height * ratio))),
+                Image.LANCZOS,
+            )
+        elif longest < 1000:
+            gray = gray.resize((gray.width * 2, gray.height * 2), Image.LANCZOS)
+
+        gray = ImageOps.autocontrast(gray, cutoff=1)
+        if ImageStat.Stat(gray).mean[0] < 110:
+            gray = ImageOps.invert(gray)
+        return gray
+
     def extract_text(self, image_path: str) -> str:
         if not pytesseract:
             raise RuntimeError("pytesseract is not installed. Install via: pip install pytesseract")
@@ -122,15 +145,10 @@ class TesseractOCR(OCRBackend):
 
         try:
             with Image.open(image_path) as img:
-                # Preprocessing for mobile app dark theme: convert to grayscale and boost contrast
-                gray = img.convert("L")
-                if ImageEnhance:
-                    enhancer = ImageEnhance.Contrast(gray)
-                    gray = enhancer.enhance(1.8)
-                text = pytesseract.image_to_string(gray, lang="eng", config="--psm 6")
+                prepared = self._prepare_image(img)
+                text = pytesseract.image_to_string(prepared, lang="eng", config="--psm 6")
                 if not text or len(text.strip()) < 10:
-                    # Fallback to standard PSM 3 (fully automatic page segmentation)
-                    text = pytesseract.image_to_string(gray, lang="eng", config="--psm 3")
+                    text = pytesseract.image_to_string(prepared, lang="eng", config="--psm 3")
                 return text or ""
         except Exception as e:
             raise RuntimeError(f"Tesseract OCR failed on image '{image_path}': {e}") from e
