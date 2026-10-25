@@ -98,6 +98,7 @@ Both data files are ignored by git. Back them up before changing machines.
 | `python main.py --slots 2.0,1.8,1.6,1.4,1.2` | Override slot multipliers. |
 | `python main.py --verbose` | Enable debug logging for data fetching. |
 | `python main.py --quiet` | Suppress warning and info logs. |
+| `python main.py --version` | Print the engine version. |
 
 Diagnostic logs are written to stderr. Lineup tables and reports stay on stdout,
 so piping the report does not mix in log lines.
@@ -122,6 +123,18 @@ local cache. Older historical dates require previously synced data.
   says so.
 - Settlement estimates actual scores from boxscore events. When app payouts
   are recorded with `--record`, those values take precedence for calibration.
+
+## Project layout
+
+- `main.py` - CLI entry point and slate orchestration.
+- `db.py` - SQLite schema, caches, and history.
+- `nhl_api.py` - NHL, ESPN, and Daily Faceoff clients.
+- `model.py` - projections, calibration, and backtesting.
+- `optimizer.py` - lineup dynamic programming and Monte-Carlo simulation.
+- `boosters.py` - booster parsing, file storage, and database sync.
+- `image_parser.py` - OCR screenshot parsing.
+- `paths.py` - user data directory resolution.
+- `slate.py` - schedule selection and slate helpers.
 
 ## Development
 
