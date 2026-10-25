@@ -1171,7 +1171,7 @@ def build_skater_projection(
         )
         return pred["xRRS"], pred["base_pts"]
     else:
-        # Point 15: For past slates, do not leak full-season club stats
+        # Past slates must not use end-of-season club stats.
         if game_date < today_str:
             return 0.0, 0.0
         xrrs = skater.get("xRRS", 0.0)
