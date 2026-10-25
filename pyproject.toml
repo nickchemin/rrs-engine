@@ -34,3 +34,22 @@ dependencies = [
 
 [project.scripts]
 rrs = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = [
+    "db",
+    "image_parser",
+    "main",
+    "model",
+    "nhl_api",
+    "optimizer",
+]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+skip_covered = true
