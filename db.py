@@ -21,6 +21,15 @@ def season_from_date(game_date: str) -> str:
         return "20242025"
 
 
+def _as_float(value: Any, default: float) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class TeamLines(dict):
     """
     Dict mapping player line records. Supports keying by (player_name, pos_group)
@@ -391,10 +400,10 @@ class Database:
                         updated_at=excluded.updated_at
                 """, (
                     team,
-                    float(data.get("ga_per_game", 3.0)),
-                    float(data.get("defense_factor", 1.0)),
-                    float(data.get("pk_pct", 0.80)),
-                    float(data.get("times_shorthanded_per_game", 3.0)),
+                    _as_float(data.get("ga_per_game"), 3.0),
+                    _as_float(data.get("defense_factor"), 1.0),
+                    _as_float(data.get("pk_pct"), 0.80),
+                    _as_float(data.get("times_shorthanded_per_game"), 3.0),
                     now
                 ))
             conn.commit()
@@ -739,9 +748,9 @@ class Database:
                 season_id,
                 1 if g.get("homeRoadFlag") == "H" or g.get("is_home") in (1, True) else 0,
                 g.get("opponentAbbrev", ""),
-                float(g.get("goals", 0)),
-                float(g.get("assists", 0)),
-                float(g.get("shots", 0)),
+                _as_float(g.get("goals"), 0.0),
+                _as_float(g.get("assists"), 0.0),
+                _as_float(g.get("shots"), 0.0),
                 toi_str,
                 toi_min,
                 is_b2b,
@@ -907,8 +916,8 @@ class Database:
                     g_date,
                     data.get("goalie_name", ""),
                     data.get("status", "Projected"),
-                    float(data.get("save_pct", 0.902)),
-                    float(data.get("gaa", 3.00)),
+                    _as_float(data.get("save_pct"), 0.902),
+                    _as_float(data.get("gaa"), 3.00),
                     now
                 ))
 

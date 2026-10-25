@@ -3243,6 +3243,42 @@ class TestDatabasePersistence(unittest.TestCase):
         self.assertEqual(logs[1]["rest_days"], 1.0)
         self.assertEqual(logs[1]["is_b2b"], 1)
 
+    def test_writes_accept_missing_numeric_values(self):
+        self.db.save_player(7003, "Test Skater Three", team="COL", position="C")
+        self.db.save_game_logs(7003, [{
+            "gameId": 9004,
+            "gameDate": "2026-10-20",
+            "goals": None,
+            "assists": None,
+            "shots": None,
+            "toi": None,
+        }])
+
+        log = self.db.get_game_logs(7003)[0]
+        self.assertEqual(log["goals"], 0.0)
+        self.assertEqual(log["assists"], 0.0)
+        self.assertEqual(log["shots"], 0.0)
+        self.assertEqual(log["toi"], "00:00")
+
+        self.db.save_standings({"COL": {
+            "ga_per_game": None,
+            "defense_factor": None,
+            "pk_pct": None,
+            "times_shorthanded_per_game": None,
+        }})
+        standings = self.db.get_standings()
+        self.assertEqual(standings["COL"]["ga_per_game"], 3.0)
+        self.assertEqual(standings["COL"]["defense_factor"], 1.0)
+        self.assertEqual(standings["COL"]["pk_pct"], 0.80)
+
+        self.db.save_starting_goalies(
+            {"COL": {"goalie_name": "Test Goalie", "save_pct": None, "gaa": None}},
+            game_date="2026-10-20",
+        )
+        goalies = self.db.get_starting_goalies(game_date="2026-10-20")
+        self.assertEqual(goalies["COL"]["save_pct"], 0.902)
+        self.assertEqual(goalies["COL"]["gaa"], 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()
