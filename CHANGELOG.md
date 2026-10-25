@@ -2,6 +2,13 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.6.3] - 2026-10-26
+
+### Fixed
+- Power-play units for defensemen are preserved when Daily Faceoff omits the position on special-teams rows.
+- Simulation reports the actual iteration count, including the 3,000-iteration stack evaluation.
+- The tournament synergy score is labeled as a heuristic instead of a projected payout.
+
 ## [2.6.2] - 2026-10-26
 
 ### Changed
