@@ -739,24 +739,21 @@ class NHLClient:
                     players = comb.get("players", [])
                     if not players:
                         logger.warning("Daily Faceoff players data missing for %s", team)
-                    for p in players:
-                        p_name = p.get("name")
-                        if not p_name:
-                            continue
-                        nk = name_key(p_name)
-                        pos_id = (p.get("positionIdentifier") or p.get("position") or "").strip().upper()
-                        grp_id = (p.get("groupIdentifier") or "").strip().upper()
-                        if pos_id in ("D", "LD", "RD") or grp_id.startswith("D"):
-                            pos_group = "D"
-                        elif pos_id in ("G",) or grp_id.startswith("G"):
-                            pos_group = "G"
-                        else:
-                            pos_group = "F"
 
-                        key = (nk, pos_group)
+                    def position_group(player: Dict[str, Any]) -> Tuple[str, str]:
+                        pos_id = (player.get("positionIdentifier") or player.get("position") or "").strip().upper()
+                        grp_id = (player.get("groupIdentifier") or "").strip().upper()
+                        if pos_id in ("D", "LD", "RD") or grp_id.startswith("D"):
+                            return "D", pos_id
+                        if pos_id == "G" or grp_id.startswith("G"):
+                            return "G", pos_id
+                        return "F", pos_id
+
+                    def ensure_entry(player_name: str, pos_group: str, pos_id: str) -> Dict[str, Any]:
+                        key = (name_key(player_name), pos_group)
                         if key not in lines_data:
                             lines_data[key] = {
-                                "player_name": p_name,
+                                "player_name": player_name,
                                 "pos_group": pos_group,
                                 "ev_line": None,
                                 "pp_unit": None,
@@ -764,21 +761,44 @@ class NHLClient:
                                 "position": pos_id
                             }
                         entry = lines_data[key]
-                        cat = (p.get("categoryIdentifier") or "").lower()
-                        grp = (p.get("groupIdentifier") or "").lower()
-                        if cat == "ev":
-                            if grp in ("f1", "f2", "f3", "f4"):
-                                entry["ev_line"] = grp.replace("f", "L").upper()
-                            elif grp in ("d1", "d2", "d3", "d4"):
-                                entry["ev_line"] = grp.upper()
-                        elif cat == "pp":
-                            if grp in ("pp1", "pp2"):
-                                entry["pp_unit"] = grp.upper()
-                        elif cat == "pk":
-                            if grp in ("pk1", "pk2"):
-                                entry["pk_unit"] = grp.upper()
                         if pos_id and not pos_id.startswith("G") and not pos_id.startswith("IR"):
-                            entry["position"] = pos_id
+                            entry["position"] = entry.get("position") or pos_id
+                        return entry
+
+                    # Even-strength rows define each player's position group.
+                    for p in players:
+                        if (p.get("categoryIdentifier") or "").lower() != "ev":
+                            continue
+                        p_name = p.get("name")
+                        if not p_name:
+                            continue
+                        pos_group, pos_id = position_group(p)
+                        entry = ensure_entry(p_name, pos_group, pos_id)
+                        grp = (p.get("groupIdentifier") or "").lower()
+                        if grp in ("f1", "f2", "f3", "f4"):
+                            entry["ev_line"] = grp.replace("f", "L").upper()
+                        elif grp in ("d1", "d2", "d3", "d4"):
+                            entry["ev_line"] = grp.upper()
+
+                    # Power-play and penalty-kill rows attach to the even-strength entry.
+                    for p in players:
+                        cat = (p.get("categoryIdentifier") or "").lower()
+                        if cat not in ("pp", "pk"):
+                            continue
+                        p_name = p.get("name")
+                        if not p_name:
+                            continue
+                        pos_group, pos_id = position_group(p)
+                        existing_key = next(
+                            (key for key in lines_data if key[0] == name_key(p_name)),
+                            None,
+                        )
+                        entry = lines_data[existing_key] if existing_key else ensure_entry(p_name, pos_group, pos_id)
+                        grp = (p.get("groupIdentifier") or "").lower()
+                        if cat == "pp" and grp in ("pp1", "pp2"):
+                            entry["pp_unit"] = grp.upper()
+                        elif cat == "pk" and grp in ("pk1", "pk2"):
+                            entry["pk_unit"] = grp.upper()
 
                     # Namesake aliases for 3-word names (e.g. Elias Nils Pettersson -> Elias Pettersson)
                     for (nk_item, p_grp), entry in list(lines_data.items()):

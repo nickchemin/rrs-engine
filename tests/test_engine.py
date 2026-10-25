@@ -1183,7 +1183,7 @@ class TestTeamLinesAndDeployment(unittest.TestCase):
                             {"name": "Connor McDavid", "categoryIdentifier": "ev", "groupIdentifier": "f1", "positionIdentifier": "c"},
                             {"name": "Connor McDavid", "categoryIdentifier": "pp", "groupIdentifier": "pp1", "positionIdentifier": "c"},
                             {"name": "Evan Bouchard", "categoryIdentifier": "ev", "groupIdentifier": "d1", "positionIdentifier": "rd"},
-                            {"name": "Evan Bouchard", "categoryIdentifier": "pp", "groupIdentifier": "pp1", "positionIdentifier": "rd"},
+                            {"name": "Evan Bouchard", "categoryIdentifier": "pp", "groupIdentifier": "pp1"},
                             {"name": "Ryan Shea", "categoryIdentifier": "ev", "groupIdentifier": "d2", "positionIdentifier": "ld"}
                         ]
                     }
@@ -1203,6 +1203,7 @@ class TestTeamLinesAndDeployment(unittest.TestCase):
             self.assertEqual(res["connor mcdavid"]["pp_unit"], "PP1")
             self.assertEqual(res["evan bouchard"]["ev_line"], "D1")
             self.assertEqual(res["evan bouchard"]["pp_unit"], "PP1")
+            self.assertNotIn(("evan bouchard", "F"), res)
             self.assertEqual(res["ryan shea"]["ev_line"], "D2")
             self.assertIsNone(res["ryan shea"]["pp_unit"])
 
