@@ -65,6 +65,9 @@ UI_IGNORE_WORDS = {
 
 class OCRBackend:
     """Base class for image OCR extraction backends."""
+    def is_available(self) -> bool:
+        return True
+
     def extract_text(self, image_path: str) -> str:
         raise NotImplementedError
 
@@ -139,8 +142,8 @@ class TesseractOCR(OCRBackend):
             raise RuntimeError("pytesseract is not installed. Install via: pip install pytesseract")
         if not self.is_available():
             raise RuntimeError(
-                f"Tesseract binary not found at '{self.tesseract_cmd}'. "
-                "Please install Tesseract-OCR or set the TESSERACT_CMD environment variable."
+                "Tesseract binary was not found. Install Tesseract-OCR and add it to PATH, "
+                "or set TESSERACT_CMD to the executable."
             )
         if not Image:
             raise RuntimeError("Pillow is not installed. Install via: pip install pillow")
@@ -539,6 +542,13 @@ def parse_images_directory(
         (detected_boosters_dict, detailed_match_records)
     """
     backend = ocr_backend or get_default_ocr_backend()
+    if not backend.is_available():
+        print(
+            "OCR backend is not available. Install Tesseract-OCR and add it to PATH, "
+            "or set TESSERACT_CMD to the executable."
+        )
+        return {}, []
+
     image_files = scan_image_files(folder_path)
 
     detected_boosters: Dict[str, float] = {}

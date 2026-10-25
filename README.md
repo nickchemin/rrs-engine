@@ -30,6 +30,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+To install the `rrs` console script instead of running `main.py` directly:
+
+```bash
+pip install .
+rrs --help
+```
+
 ## Quickstart
 
 1. Sync the current slate and generate a boosters file:

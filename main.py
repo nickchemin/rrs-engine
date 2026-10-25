@@ -55,6 +55,8 @@ __all__ = [
     "solve_stacked_lineup",
 ]
 
+VERSION = "2.6.3"
+
 BOOSTERS_FILE = str(boosters_path())
 
 ESPN_TEAM_MAP = {
@@ -100,7 +102,7 @@ def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str 
     if target_date:
         sub += f" | Date: {target_date}"
     banner = (
-        r"  ____   ____   ____     RRS ENGINE v2.6.3" "\n"
+        rf"  ____   ____   ____     RRS ENGINE v{VERSION}" "\n"
         r" |  _ \ |  _ \ / ___|    NHL Quant Draft Optimizer | Real Rating System" "\n"
         rf" | |_) || |_) |\___ \    {sub}" "\n"
         r" |  _ < |  _ <  ___) |" "\n"
@@ -839,7 +841,7 @@ def sync_game_day(client: NHLClient, db: Database, target_date: str = "", force:
     save_boosters_file(existing_boosters, candidates, dtd_players=dtd_skaters, depth_players=depth_skaters)
     sync_boosters_to_db(db, existing_boosters)
 
-    print(f"Saved {len(candidates)} active game-day players to {os.path.basename(BOOSTERS_FILE)}")
+    print(f"Saved {len(candidates)} active game-day players to {BOOSTERS_FILE}")
     if excluded_count > 0 or dtd_skaters:
         print(f"Injuries: {excluded_count} Out/IR players excluded, {len(dtd_skaters)} Day-To-Day players commented out.")
     if goalies:
@@ -1290,16 +1292,17 @@ def handle_record_app_scores(db: Database, record_arg: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RRS Engine v2.6.3 - Real Rating System & NHL Quant Draft Optimizer")
+    parser = argparse.ArgumentParser(description=f"RRS Engine v{VERSION} - Real Rating System & NHL Quant Draft Optimizer")
+    parser.add_argument("--version", action="version", version=f"RRS Engine {VERSION}")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")
     group.add_argument("--record", nargs="?", const="today", default=None, help="Record actual Real Sports mobile app ratings and payouts (YYYY-MM-DD or YYYY-MM-DD:s1,s2,s3,s4,s5)")
     group.add_argument("--parse-images", type=str, default=None, metavar="FOLDER", help="Parse Real Sports draft screenshots from folder to populate boosters.txt")
+    group.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
+    group.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
+    group.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
     parser.add_argument("--date", type=parse_iso_date_arg, default="", help="Target date (YYYY-MM-DD), default is current day")
-    parser.add_argument("--train", action="store_true", help="Run ML model validation (MAE metrics)")
-    parser.add_argument("--calibrate", action="store_true", help="Calibrate RRS scoring formula weights via OLS regression on settled history")
-    parser.add_argument("--stack", action="store_true", help="Generate only the correlated tournament stack lineup")
     parser.add_argument("--slots", type=str, default="", help="Custom comma-separated slot multipliers (default: 2.0,1.8,1.6,1.4,1.2)")
     log_group = parser.add_mutually_exclusive_group()
     log_group.add_argument("--verbose", action="store_true", help="Enable debug logging.")
@@ -1348,7 +1351,9 @@ def main():
 
     if args.parse_images is not None:
         from image_parser import handle_parse_images
-        handle_parse_images(args.parse_images, client, db, target_date=args.date)
+        result = handle_parse_images(args.parse_images, client, db, target_date=args.date)
+        if not result:
+            raise SystemExit(1)
         return
 
     if args.record is not None:
@@ -1358,7 +1363,6 @@ def main():
     if args.history is not None:
         target_d = args.history if args.history != "all" else None
         show_history_report(db, target_date=target_d)
-        load_or_fetch_standings(client)
         return
 
     if args.calibrate:
@@ -1371,7 +1375,10 @@ def main():
 
     # If --sync is passed or boosters.txt does not exist, run sync first
     if args.sync or not os.path.exists(BOOSTERS_FILE):
-        sync_game_day(client, db, target_date=args.date, force=True)
+        if not args.sync:
+            print("No boosters file found; syncing the current slate first.")
+        if not sync_game_day(client, db, target_date=args.date, force=True):
+            raise SystemExit(1)
         if args.sync:
             return
 
@@ -1388,13 +1395,13 @@ def main():
     schedule = client.get_upcoming_schedule()
     if not schedule:
         print("Schedule is unavailable.")
-        return
+        raise SystemExit(1)
 
     target_day = select_game_day(schedule, args.date, nhl_today())
 
     if not target_day:
         print(f"No games found for date: {args.date or 'today'}")
-        return
+        raise SystemExit(1)
 
     game_date = target_day["date"]
     games = target_day.get("games", [])

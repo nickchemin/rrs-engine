@@ -32,6 +32,19 @@ dependencies = [
     "pytesseract>=0.3.10",
 ]
 
+[tool.setuptools]
+py-modules = [
+    "db",
+    "image_parser",
+    "main",
+    "model",
+    "nhl_api",
+    "optimizer",
+    "paths",
+    "slate",
+]
+packages = []
+
 [project.scripts]
 rrs = "main:main"
 
