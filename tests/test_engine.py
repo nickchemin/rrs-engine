@@ -615,6 +615,7 @@ class TestDatabaseAndHistory(unittest.TestCase):
             assists = (i + 1) % 3
             shots = 2 + i % 2
             records.append({
+                "game_date": f"2026-10-{i + 1:02d}",
                 "actual_goals": goals,
                 "actual_assists": assists,
                 "actual_shots": shots,
@@ -631,6 +632,8 @@ class TestDatabaseAndHistory(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result["persisted"])
         self.assertEqual(fake_db.saved, result["weights"])
+        self.assertEqual(result["holdout"]["n_train"], 14)
+        self.assertEqual(result["holdout"]["n_test"], 6)
 
         small_db = FakeDB(records[:8])
         small_result = calibrate_rrs_formula(small_db)

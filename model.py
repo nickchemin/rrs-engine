@@ -699,6 +699,29 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
     except Exception:
         t_stats = {}
 
+    holdout = None
+    if len(valid) >= 20:
+        order = sorted(range(len(valid)), key=lambda idx: valid[idx].get("game_date", ""))
+        split = max(1, int(len(order) * 0.7))
+        train_idx = order[:split]
+        test_idx = order[split:]
+        if test_idx:
+            X_train = X[train_idx]
+            Y_train = Y[train_idx]
+            X_test = X[test_idx]
+            Y_test = Y[test_idx]
+            holdout_weights, _, _, _ = np.linalg.lstsq(X_train, Y_train, rcond=None)
+            holdout_pred = X_test @ holdout_weights
+            holdout_ss_res = np.sum((Y_test - holdout_pred) ** 2)
+            holdout_ss_tot = np.sum((Y_test - np.mean(Y_test)) ** 2)
+            holdout = {
+                "n_train": len(train_idx),
+                "n_test": len(test_idx),
+                "r2": round(float(1.0 - holdout_ss_res / holdout_ss_tot), 4) if holdout_ss_tot > 0 else 0.0,
+                "mae": round(float(np.mean(np.abs(Y_test - holdout_pred))), 3),
+                "rmse": round(float(np.sqrt(np.mean((Y_test - holdout_pred) ** 2))), 3),
+            }
+
     # Multiplier Stacking Test (Additive vs Multiplicative)
     stacking_result = None
     payout_records = [v for v in valid if v["app_payout"] is not None and v["target"] > 0]
@@ -734,6 +757,7 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
         "r2": round(r2, 4),
         "mae": round(mae, 3),
         "rmse": round(rmse, 3),
+        "holdout": holdout,
         "stacking_test": stacking_result
     }
 
@@ -763,6 +787,13 @@ def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Opt
     print(f"  • R² (Variance Explained): {r2:.4f}")
     print(f"  • Mean Absolute Error:     {mae:.3f} RRS")
     print(f"  • Root Mean Squared Error: {rmse:.3f} RRS")
+
+    if holdout:
+        print("\nOut-of-Time Holdout:")
+        print(f"  • Train/Test Split:        {holdout['n_train']}/{holdout['n_test']}")
+        print(f"  • R² (Variance Explained): {holdout['r2']:.4f}")
+        print(f"  • Mean Absolute Error:     {holdout['mae']:.3f} RRS")
+        print(f"  • Root Mean Squared Error: {holdout['rmse']:.3f} RRS")
 
     if stacking_result:
         print("\nMultiplier Stacking Structure Verification:")
