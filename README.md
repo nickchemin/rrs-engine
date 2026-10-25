@@ -134,6 +134,9 @@ local cache. Older historical dates require previously synced data.
 - `boosters.py` - booster parsing, file storage, and database sync.
 - `image_parser.py` - OCR screenshot parsing.
 - `paths.py` - user data directory resolution.
+- `reporting.py` - history reports and app score recording.
+- `settlement.py` - settled results and DNP handling.
+- `cli_utils.py` - date argument parsing.
 - `slate.py` - schedule selection and slate helpers.
 
 ## Development
@@ -141,7 +144,7 @@ local cache. Older historical dates require previously synced data.
 ```bash
 pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-python -m coverage run --source=boosters,db,image_parser,main,model,nhl_api,optimizer,paths,slate -m unittest discover -s tests
+python -m coverage run --source=boosters,cli_utils,db,image_parser,main,model,nhl_api,optimizer,paths,reporting,settlement,slate -m unittest discover -s tests
 python -m coverage report
 ```
 

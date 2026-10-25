@@ -35,6 +35,7 @@ dependencies = [
 [tool.setuptools]
 py-modules = [
     "boosters",
+    "cli_utils",
     "db",
     "image_parser",
     "main",
@@ -42,6 +43,8 @@ py-modules = [
     "nhl_api",
     "optimizer",
     "paths",
+    "reporting",
+    "settlement",
     "slate",
 ]
 packages = []
@@ -56,6 +59,7 @@ addopts = "-ra"
 [tool.coverage.run]
 source = [
     "boosters",
+    "cli_utils",
     "db",
     "image_parser",
     "main",
@@ -63,6 +67,8 @@ source = [
     "nhl_api",
     "optimizer",
     "paths",
+    "reporting",
+    "settlement",
     "slate",
 ]
 
