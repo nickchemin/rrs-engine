@@ -736,11 +736,24 @@ class Database:
         with self._get_connection() as conn:
             cur = conn.cursor()
             cur.executemany("""
-                INSERT OR IGNORE INTO game_logs (
+                INSERT INTO game_logs (
                     player_id, game_id, game_date, season, is_home, opponent,
                     goals, assists, shots, toi, toi_minutes,
                     is_b2b, rest_days, opp_is_b2b
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(player_id, game_id) DO UPDATE SET
+                    game_date = excluded.game_date,
+                    season = excluded.season,
+                    is_home = excluded.is_home,
+                    opponent = excluded.opponent,
+                    goals = excluded.goals,
+                    assists = excluded.assists,
+                    shots = excluded.shots,
+                    toi = excluded.toi,
+                    toi_minutes = excluded.toi_minutes,
+                    is_b2b = excluded.is_b2b,
+                    rest_days = excluded.rest_days,
+                    opp_is_b2b = excluded.opp_is_b2b
             """, rows)
             conn.commit()
 

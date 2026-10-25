@@ -3156,7 +3156,7 @@ class TestPhase5ComprehensiveSuite(unittest.TestCase):
         self.assertFalse(adapter.max_retries.raise_on_status)
 
 
-class TestLineupHistoryPersistence(unittest.TestCase):
+class TestDatabasePersistence(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.db = Database(os.path.join(self.tmp_dir, "history.db"))
@@ -3197,6 +3197,31 @@ class TestLineupHistoryPersistence(unittest.TestCase):
         self.assertEqual(rows[0]["actual_goals"], 1.0)
         self.assertEqual(rows[0]["app_rrs"], 5.5)
         self.assertEqual(rows[0]["app_payout"], 11.0)
+
+    def test_resyncing_game_log_updates_existing_row(self):
+        self.db.save_player(7001, "Test Skater", team="COL", position="C")
+        self.db.save_game_logs(7001, [{
+            "gameId": 9001,
+            "gameDate": "2026-10-20",
+            "goals": 1,
+            "assists": 0,
+            "shots": 2,
+            "toi": "15:00",
+        }])
+        self.db.save_game_logs(7001, [{
+            "gameId": 9001,
+            "gameDate": "2026-10-20",
+            "goals": 3,
+            "assists": 1,
+            "shots": 5,
+            "toi": "18:30",
+        }])
+
+        logs = self.db.get_game_logs(7001)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["goals"], 3.0)
+        self.assertEqual(logs[0]["assists"], 1.0)
+        self.assertEqual(logs[0]["toi"], "18:30")
 
 
 if __name__ == "__main__":
