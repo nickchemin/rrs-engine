@@ -1014,13 +1014,16 @@ class TestQAThirdReview(unittest.TestCase):
                 os.remove(path)
 
     # Point 11: save_injuries INSERT OR REPLACE and clearing on empty ESPN response
-    def test_point_11_save_injuries_replace_and_clear_on_empty(self):
+    def test_injury_cache_survives_empty_upstream_response(self):
         dupe_injuries = [
             {"name": "No Team Guy", "team": "", "status": "Out"},
             {"name": "No Team Guy", "team": "", "status": "Out"}
         ]
         self.db.save_injuries(dupe_injuries)
-        self.assertIsNotNone(self.db.get_injuries())
+        self.assertEqual(len(self.db.get_injuries()), 1)
+
+        self.db.save_injuries([])
+        self.assertEqual(len(self.db.get_injuries()), 1)
 
         client = NHLClient(db=self.db)
         mock_res = MagicMock()
@@ -1028,7 +1031,7 @@ class TestQAThirdReview(unittest.TestCase):
         mock_res.json.return_value = {"injuries": []}
         client.session.get = MagicMock(return_value=mock_res)
         client.get_injuries(force=True)
-        self.assertIsNone(self.db.get_injuries())
+        self.assertEqual(len(self.db.get_injuries()), 1)
 
     # Point 12: Depth player TOI divmod formatting
     def test_point_12_depth_toi_divmod(self):

@@ -518,7 +518,8 @@ class NHLClient:
                             "status": status,
                             "detail": detail
                         }
-                self.db.save_injuries(injuries_list)
+                if injuries_list:
+                    self.db.save_injuries(injuries_list)
         except Exception as e:
             print(f"Failed to fetch injury report: {e}")
 

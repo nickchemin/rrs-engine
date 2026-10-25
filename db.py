@@ -791,6 +791,8 @@ class Database:
             }
 
     def save_injuries(self, injuries: List[Dict[str, Any]]):
+        if not injuries:
+            return
         now = time.time()
         with self._get_connection() as conn:
             cur = conn.cursor()
