@@ -1,116 +1,113 @@
 # RRS Engine
 
-Quantitative draft optimizer and sports analytics terminal for NHL contests on the **Real Sports** mobile app. Engineered with Generalized Linear Models (Poisson & Ridge Regression), schedule fatigue analytics, opponent penalty kill modulation, vectorized Monte-Carlo covariance simulation, exact $O(5N)$ dynamic programming lineup optimization, fault-tolerant scraping with TOI line fallback, and automatic draft screenshot OCR parsing.
+Command-line projection and lineup optimizer for NHL drafts on the Real Sports app.
+It collects schedule, roster, injury, goalie, and line data, projects player
+performance, solves a five-slot lineup, and tracks settled results over time.
 
----
+## Requirements
 
-## Key Features
+- Python 3.10 or newer.
+- Network access to the NHL API, ESPN, and Daily Faceoff.
+- Tesseract OCR is required only for `--parse-images`.
 
-- **Advanced Feature Engineering & xRRS Projections**:
-  - Predicts individual skater performance using Poisson GLM (log-link) for discrete scoring counts (goals and assists) and Ridge Regression for continuous time-on-ice (`xTOI`).
-  - Incorporates schedule fatigue metrics: home ice advantage (`is_home`), back-to-back fatigue (`is_b2b`), rest days differential (`rest_days`), and opponent fatigue status (`opp_is_b2b`).
-  - Modulates power play units (`PP1`/`PP2`) dynamically based on opponent penalty kill efficiency (`opp_pk_pct`) and penalty frequency (`opp_times_shorthanded`).
-  - Applies Bayesian shrinkage against positional priors for skaters with small sample sizes ($GP < 10$).
-- **Vectorized Monte-Carlo Covariance Simulation (`--stack`)**:
-  - Simulates 10,000 correlated slate iterations in $< 20$ ms via Cholesky decomposition of empirical covariance matrix $\Sigma = D R D$.
-  - Models offensive teammate co-occurrence across deployment tiers (`L1+PP1`, `PP1 QB + Forward`, `L1 linemates`).
-  - Computes actionable distribution quantiles:
-    - **Expected Score (Mean)**: mathematical payout expectation.
-    - **Floor (25th percentile)**: downside risk scenario for Cash games.
-    - **Ceiling (90th / 95th percentile)**: explosive upside potential for GPP tournaments.
-- **Exact Dynamic Programming Optimizer**:
-  - Solves the optimal 5-slot booster configuration in $O(5N)$ using the rearrangement inequality in $< 1$ ms.
-  - Supports configurable slot multipliers (e.g. `--slots 2.0,1.8,1.6,1.4,1.2`).
-- **Scraping Fault Tolerance & Network Resilience**:
-  - Centralized retry mechanism with exponential backoff on transient HTTP status codes (`429`, `500`, `502`, `503`, `504`) and network dropouts.
-  - Automatic line combination fallback: if Daily Faceoff fails or alters HTML, dynamically reconstructs forward lines (`L1-L4`), defense pairings (`D1-D3`), and power play units (`PP1/PP2`) from official NHL stats API time-on-ice profiles (`skater/timeonice`).
-- **Draft Screenshot OCR & Booster Auto-Fill (`--parse-images`)**:
-  - Automatically extracts player names and booster multipliers (`+0.4`, `1.2x`, `+20%`, `0.8`, `3.0`) from screenshots of the Real Sports mobile app draft screen.
-  - High-performance fuzzy matching via `RapidFuzz` (with `difflib` fallback) matching noisy OCR text to active game-day skaters.
-  - Handles namesakes and duplicate player disambiguation (e.g., `Elias Pettersson (D)` vs `Elias Pettersson (C)`).
-  - Automatically updates `boosters.txt` preserving team section formatting and syncs directly to the SQLite database.
-- **Settlement & Scoring Calibration**:
-  - Fetches official NHL boxscores to settle historical contests.
-  - Re-calibrates scoring formula weights via OLS regression (`--calibrate`) against ground-truth mobile app payouts (`app_rrs` and `app_payout`).
-  - Out-of-sample backtest suite (`--train`) benchmarking rolling averages, Ridge regression, and Poisson GLM side-by-side with zero look-ahead bias.
+Tesseract installation:
 
----
+- Windows: install the UB Mannheim build and add its directory to `PATH`, or set
+  `TESSERACT_CMD` to the full path of `tesseract.exe`.
+- macOS: `brew install tesseract`
+- Debian/Ubuntu: `sudo apt install tesseract-ocr`
 
-## Quickstart
+The `pytesseract` package is a wrapper; it does not include the binary.
 
-### 1. Installation
+## Installation
+
 ```bash
 git clone https://github.com/nickchemin/rrs-engine.git
 cd rrs-engine
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux and macOS
 pip install -r requirements.txt
 ```
 
-### 2. Sync Slate
+## Quickstart
+
+1. Sync the current slate and generate a boosters file:
+
 ```bash
 python main.py --sync
 ```
-Fetches today's NHL schedule, matches starting goalies, synchronizes line combinations, filters injured players, and generates partitioned `boosters.txt`.
 
-### 3. Set Boosters
+2. Fill in booster multipliers. Either edit `boosters.txt` directly (use
+   `boosters.example.txt` as the format reference) or parse screenshots of the
+   draft screen:
 
-#### Option A: Automatic Screenshot Parsing (Recommended)
-Take screenshots of the draft screen in the Real Sports app, place them in a folder (e.g. `screenshots/`), and run:
 ```bash
 python main.py --parse-images screenshots
 ```
-The engine will run OCR, match players via fuzzy search, and automatically populate `boosters.txt` and the database.
 
-#### Option B: Manual Editing (`boosters.txt`)
-Edit `boosters.txt` directly (supports percentages, multipliers, decimals, and commas):
-```text
-Nathan MacKinnon         = 0.0  # L1/PP1
-Cale Makar               = 0.4  # D1/PP1
-Rickard Rakell           = 2.2x # L2/PP2
-Egor Chinakhov           = 80%  # Evaluates to 0.80
-Brent Burns              = 1,5  # Evaluates to 1.50 | D2
-Sam Malinski             = .5   # Evaluates to 0.50
-Elias Pettersson (D)     = 0.0  # VAN D | D2
-```
+3. Generate lineups:
 
-### 4. Optimize Lineups
-**Windows**:
 ```bash
 python main.py
 ```
-*(or double-click `run.bat`)*
 
-**Linux / macOS**:
-```bash
-chmod +x run.sh && ./run.sh
-```
+The command prints a standard lineup and a correlated tournament lineup with
+projected payout quantiles.
 
-### 5. Run Offline Test Suite
-```bash
-pytest -v
-# or
-python -m unittest discover -s tests -v
-```
+## Data
 
----
+Runtime state lives next to the source files:
 
-## Command Reference
+- `data.db` - SQLite database with players, game logs, lines, standings, and
+  lineup history.
+- `boosters.txt` - player booster values, partitioned by team.
+
+Both files are ignored by git. Back them up before changing machines.
+
+## Commands
 
 | Command | Description |
 | :--- | :--- |
-| `python main.py` | Generates standard optimal lineup and correlated tournament stack with Monte-Carlo distribution metrics. |
-| `python main.py --stack` | Solves exclusively for correlated tournament stacks. |
-| `python main.py --parse-images <folder>` | Runs OCR on mobile app screenshots from folder, fuzzy matches active players, and auto-populates `boosters.txt`. |
-| `python main.py --sync` | Fetches active NHL roster, starting goalies, lines, and initializes/refreshes `boosters.txt`. |
-| `python main.py --date YYYY-MM-DD` | Runs optimizer for a specific slate date. |
-| `python main.py --sync --date YYYY-MM-DD` | Syncs rosters and generates `boosters.txt` for a specific historical or future slate date. |
-| `python main.py --history [date\|all]` | Performance tracking report with cumulative payout, ROI, and settled contest statistics. |
-| `python main.py --record [date]` | Records verified ground-truth Real Sports mobile app ratings (`app_rrs`) and payouts (`app_payout`). |
-| `python main.py --slots 2.0,1.8,...` | Runs optimizer with custom slot multipliers (default: `2.0,1.8,1.6,1.4,1.2`). |
-| `python main.py --calibrate` | OLS empirical regression reverse-engineering app scoring weights and verifying additive vs multiplicative mechanics. |
-| `python main.py --train` | Runs comparative multi-model benchmark (Rolling Average, Ridge, Poisson GLM) with strict point-in-time cross-validation. |
+| `python main.py` | Standard lineup plus tournament stack with payout quantiles. |
+| `python main.py --stack` | Tournament stack only. |
+| `python main.py --sync` | Fetch schedule, rosters, goalies, injuries, and lines; write `boosters.txt`. |
+| `python main.py --parse-images <folder>` | OCR draft screenshots and merge detected boosters. |
+| `python main.py --date YYYY-MM-DD` | Target a specific slate date available in the cached or current schedule window. |
+| `python main.py --history [date\|all]` | Print settled results, app payouts, and projection bias. |
+| `python main.py --record [date]` | Record Real Sports app ratings and payouts for a saved lineup. |
+| `python main.py --calibrate` | Fit scoring weights by OLS against recorded app ratings. |
+| `python main.py --train` | Run the out-of-sample model benchmark. |
+| `python main.py --slots 2.0,1.8,1.6,1.4,1.2` | Override slot multipliers. |
 
----
+`--date` is limited to dates present in the current schedule payload or the
+local cache. Older historical dates require previously synced data.
+
+## Model Notes
+
+- Player projections use per-player Poisson and Ridge models trained on prior
+  games. Rolling form, opponent defense, home ice, and deployment are inputs.
+- The default xRRS formula is a heuristic. `--calibrate` fits an OLS model
+  against recorded app ratings; fitted weights are stored in the database and
+  used by later projections only when at least 15 ground-truth records exist.
+- The tournament simulation uses a configured correlation matrix and
+  role-based coefficients of variation. Its quantiles are model output, not
+  empirical guarantees.
+- Settlement estimates actual scores from boxscore events. When app payouts
+  are recorded with `--record`, those values take precedence for calibration.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+python -m coverage run --source=db,image_parser,main,model,nhl_api,optimizer -m unittest discover -s tests
+python -m coverage report
+```
+
+CI runs the test suite on Python 3.10-3.13 for Linux and Windows and enforces a
+minimum coverage level defined in `pyproject.toml`.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT. See [LICENSE](LICENSE).
