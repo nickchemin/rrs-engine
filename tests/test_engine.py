@@ -2558,6 +2558,21 @@ class TestPhase3ScrapingAndFallback(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         mock_sleep.assert_called_once_with(2.0)
 
+    def test_game_log_failure_is_logged(self):
+        with patch.object(self.client, "request_with_retry", side_effect=requests.RequestException("boom")):
+            with self.assertLogs("nhl_api", level="DEBUG") as captured:
+                logs = self.client._fetch_game_log(1, "20252026")
+        self.assertEqual(logs, [])
+        self.assertTrue(any("Game log request failed" in message for message in captured.output))
+
+    def test_prefetch_reports_failed_game_logs(self):
+        with patch.object(self.client, "get_player_game_logs", side_effect=RuntimeError("boom")):
+            with self.assertLogs("nhl_api", level="DEBUG") as captured:
+                result = self.client.prefetch_players_game_logs([1, 2], max_workers=2)
+        self.assertEqual(result[1], [])
+        self.assertEqual(result[2], [])
+        self.assertTrue(any("Game log prefetch failed for 2 of 2 players" in message for message in captured.output))
+
     def test_request_with_retry_raises_after_max_retries(self):
         mock_req = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection dropped"))
         with patch.object(self.client.session, "get", mock_req), patch("time.sleep"):

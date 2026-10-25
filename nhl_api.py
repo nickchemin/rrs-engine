@@ -1,5 +1,6 @@
 import requests
 import json
+import logging
 import random
 import re
 import os
@@ -13,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from db import Database, season_from_date, TeamLines
+
+logger = logging.getLogger(__name__)
 
 
 class USEasternTz(tzinfo):
@@ -241,8 +244,8 @@ class NHLClient:
                                 ts_pg = float(row.get("timesShorthandedPerGame", 3.0) or 3.0)
                                 metrics[t_abbr]["pk_pct"] = round(pk_pct, 4)
                                 metrics[t_abbr]["times_shorthanded_per_game"] = round(ts_pg, 2)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Penalty-kill metrics unavailable: %s", exc)
 
                 self.db.save_standings(metrics)
         except Exception as e:
@@ -299,8 +302,8 @@ class NHLClient:
                         g["seasonId"] = season or season_from_date(g.get("gameDate", ""))
                     valid.append(g)
                 return valid
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Game log request failed for player %s: %s", player_id, exc)
         return []
 
     def get_player_game_logs(
@@ -332,8 +335,8 @@ class NHLClient:
                                 valid_logs.append(g)
                             if valid_logs:
                                 self.db.save_game_logs(player_id, valid_logs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Current-season log sync failed for player %s: %s", player_id, exc)
                 return self.db.get_game_logs(player_id)
             elif latest_date:
                 # Latest log is before start of current season: check if already checked within 24h
@@ -427,7 +430,8 @@ class NHLClient:
                     self.db.save_game_logs(player_id, valid_logs)
                 return valid_logs
             return None
-        except Exception:
+        except Exception as exc:
+            logger.debug("Historical game log request failed for player %s: %s", player_id, exc)
             return None
 
     def _fetch_team_skaters(self, team_abbrev: str) -> List[Dict[str, Any]]:
@@ -471,14 +475,19 @@ class NHLClient:
     def prefetch_players_game_logs(self, player_ids: List[int], max_workers: int = 8) -> Dict[int, List[Dict[str, Any]]]:
         unique_ids = list(set(player_ids))
         results: Dict[int, List[Dict[str, Any]]] = {}
+        failed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_id = {executor.submit(self.get_player_game_logs, pid): pid for pid in unique_ids}
             for future in as_completed(future_to_id):
                 pid = future_to_id[future]
                 try:
                     results[pid] = future.result()
-                except Exception:
+                except Exception as exc:
                     results[pid] = []
+                    failed += 1
+                    logger.debug("Game log prefetch failed for player %s: %s", pid, exc)
+        if failed:
+            logger.warning("Game log prefetch failed for %d of %d players", failed, len(unique_ids))
         return results
 
     def get_club_stats(self, team_abbrev: str) -> List[Dict[str, Any]]:
@@ -615,8 +624,8 @@ class NHLClient:
                                 "gaa": gaa,
                                 "goalie_factor": compute_goalie_factor(sv)
                             }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Starting-goalie page could not be parsed: %s", exc)
 
         # 2. Fallback to NHL API gamecenter landing for missing teams
         if games:
@@ -657,8 +666,8 @@ class NHLClient:
                                         "gaa": gaa,
                                         "goalie_factor": compute_goalie_factor(sv)
                                     }
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Goalie landing request failed for game %s: %s", g_id, exc)
 
         if goalies:
             self.db.save_starting_goalies(goalies, game_date=slate_date)
@@ -813,8 +822,8 @@ class NHLClient:
                 for item in res.json().get("data", []):
                     if "playerId" in item:
                         pid_to_toi[item["playerId"]] = item
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Time-on-ice profile unavailable for %s: %s", team, exc)
 
         skater_metrics = []
         for s in skaters:
@@ -830,7 +839,8 @@ class NHLClient:
             if not logs:
                 try:
                     logs = self._fetch_game_log(pid, curr_season)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Game log fallback failed for player %s: %s", pid, exc)
                     logs = []
 
             recent_logs = logs[-3:] if logs else []
@@ -933,6 +943,7 @@ class NHLClient:
         if not missing_teams:
             return result
 
+        failed = 0
         with ThreadPoolExecutor(max_workers=min(max_workers, len(missing_teams))) as executor:
             future_to_team = {executor.submit(self.get_team_lines, t, force=force): t for t in missing_teams}
             for fut in as_completed(future_to_team):
@@ -941,9 +952,12 @@ class NHLClient:
                     res = fut.result()
                     if res:
                         result[t] = res
-                except Exception:
-                    pass
+                except Exception as exc:
+                    failed += 1
+                    logger.debug("Line prefetch failed for %s: %s", t, exc)
 
+        if failed:
+            logger.warning("Line prefetch failed for %d of %d teams", failed, len(missing_teams))
         return result
 
 
