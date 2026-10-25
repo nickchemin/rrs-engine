@@ -586,6 +586,12 @@ class TestDatabaseAndHistory(unittest.TestCase):
         score_goal = calculate_rrs_from_stats(goals=1, assists=0, shots=3, blocks=0)
         self.assertAlmostEqual(score_goal, 3.25, places=1)
 
+    def test_score_caps_are_consistent(self):
+        from model import MAX_RRS
+
+        self.assertEqual(calculate_rrs_from_stats(goals=4, assists=4, shots=10, blocks=5), MAX_RRS)
+        self.assertEqual(calculate_xrrs_projection(5.0, 5.0, 10.0, 5.0), MAX_RRS)
+
     def test_settle_past_lineups_dnp(self):
         lineup = [
             {"id": 101, "name": "Scratched Player", "team": "BOS", "opp": "vsTOR", "slot": 1, "slot_boost": 2.0, "total_boost": 2.0, "xRRS": 3.0, "score": 6.0, "booster": 0.0}

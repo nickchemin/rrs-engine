@@ -104,6 +104,8 @@ POS_AVERAGES: Dict[str, Dict[str, float]] = {
     "F": {"goals": 0.22, "assists": 0.32, "shots": 1.9, "toi": 15.5},
 }
 
+MAX_RRS = 16.0
+
 
 def compute_line_factor(
     ev_line: Optional[str] = None,
@@ -511,7 +513,7 @@ class PerformancePredictor:
             xblk=blocked,
             is_def=is_def
         )
-        rrs_base = min(16.0, rrs_base)
+        rrs_base = min(MAX_RRS, rrs_base)
 
         return {
             "xG": round(preds["goals"], 2),
@@ -558,7 +560,7 @@ def calculate_xrrs_projection(
     elif not is_def and xg < 0.10 and xa < 0.15:
         xrrs = min(0.95, xrrs)
 
-    return round(float(np.clip(xrrs, 0.0, 16.0)), 2)
+    return round(float(np.clip(xrrs, 0.0, MAX_RRS)), 2)
 
 
 def calculate_rrs_from_stats(
@@ -595,7 +597,7 @@ def calculate_rrs_from_stats(
         base += 0.4 * (pts - 1)
 
     base += shots * 0.25 + blocks * 0.50
-    return round(min(10.0, max(0.0, base)), 1)
+    return round(min(MAX_RRS, max(0.0, base)), 1)
 
 
 def calibrate_rrs_formula(db: Any, allow_synthetic_fallback: bool = True) -> Optional[Dict[str, Any]]:
