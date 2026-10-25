@@ -100,7 +100,7 @@ def print_quant_banner(mode: str = "Optimal Draft & Stacking", target_date: str 
     if target_date:
         sub += f" | Date: {target_date}"
     banner = (
-        r"  ____   ____   ____     RRS ENGINE v2.6.0" "\n"
+        r"  ____   ____   ____     RRS ENGINE v2.6.1" "\n"
         r" |  _ \ |  _ \ / ___|    NHL Quant Draft Optimizer | Real Rating System" "\n"
         rf" | |_) || |_) |\___ \    {sub}" "\n"
         r" |  _ < |  _ <  ___) |" "\n"
@@ -1290,7 +1290,7 @@ def handle_record_app_scores(db: Database, record_arg: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RRS Engine v2.6.0 - Real Rating System & NHL Quant Draft Optimizer")
+    parser = argparse.ArgumentParser(description="RRS Engine v2.6.1 - Real Rating System & NHL Quant Draft Optimizer")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--sync", action="store_true", help="Sync game-day roster and refresh boosters.txt")
     group.add_argument("--history", nargs="?", const="all", default=None, type=parse_history_arg, help="Show performance tracking and settled RRS history (optional: YYYY-MM-DD)")

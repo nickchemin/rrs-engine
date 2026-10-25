@@ -2,6 +2,18 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.6.1] - 2026-10-26
+
+### Added
+- Ruff linting with a CI gate and development dependency.
+- `--verbose` and `--quiet` flags for diagnostic logging.
+- Shared slate helpers for schedule selection, matchups, and cached player rows.
+
+### Changed
+- Runtime data (`data.db`, `boosters.txt`) moved to the user data directory; `RRS_DATA_DIR` overrides it, legacy files are migrated once.
+- Network diagnostics use the `nhl_api` logger instead of `print`.
+- Test names and comments no longer reference review phases.
+
 ## [2.6.0] - 2026-10-26
 
 ### Fixed
