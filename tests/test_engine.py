@@ -2569,6 +2569,7 @@ class TestMonteCarloOptimizer(unittest.TestCase):
         self.assertIn("median_50", sim)
         self.assertIn("ceiling_90", sim)
         self.assertIn("ceiling_95", sim)
+        self.assertEqual(sim["n_sims"], 10000)
         self.assertLess(sim["floor_25"], sim["median_50"])
         self.assertLess(sim["median_50"], sim["ceiling_90"])
         self.assertLess(sim["ceiling_90"], sim["ceiling_95"])
