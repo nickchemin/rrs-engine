@@ -818,7 +818,7 @@ def evaluate_model(
     standings: Optional[Dict[str, Dict[str, float]]] = None,
     min_games: int = 30,
     point_in_time: bool = True
-):
+) -> Optional[Dict[str, Any]]:
     print("Evaluating model accuracy on out-of-sample test splits...")
     players = db.get_all_players() if hasattr(db, "get_all_players") else []
     if not players:
@@ -963,7 +963,11 @@ def evaluate_model(
         sp_glm[t] = calc_spearman(y_act, y_g)
 
     print("-" * 75)
-    leak_note = "Strict point-in-time (no look-ahead leakage)" if point_in_time else "End-of-season standings (with look-ahead)"
+    leak_note = (
+        "Opponent standings neutralized (no as-of standings)"
+        if point_in_time
+        else "End-of-season standings (with look-ahead)"
+    )
     print(f"Validation Results: {tested_players} players, {len(actuals['goals'])} test games [{leak_note}]:")
     print(f"  Goals (MAE):    {mae_glm['goals']:.3f} per game  (Baseline 20-game avg: {mae_base['goals']:.3f})")
     print(f"  Assists (MAE):  {mae_glm['assists']:.3f} per game  (Baseline 20-game avg: {mae_base['assists']:.3f})")
@@ -995,9 +999,11 @@ def evaluate_model(
     print("=" * 94 + "\n")
 
     # Lineup-level validation report
+    lineup_validation = None
     if hasattr(db, "get_lineup_level_validation_summary"):
         lineup_sum = db.get_lineup_level_validation_summary()
         if lineup_sum.get("settled_count", 0) > 0:
+            lineup_validation = lineup_sum
             print(f"\nLineup-Level Validation ({lineup_sum['settled_count']} settled slates, {lineup_sum['total_players']} players):")
             print(f"  Lineup Total MAE:       {lineup_sum['lineup_mae']:.2f} RRS")
             print(f"  Lineup Total RMSE:      {lineup_sum['lineup_rmse']:.2f} RRS")
@@ -1009,3 +1015,26 @@ def evaluate_model(
             if lineup_sum.get("booster_avg_error") is not None and lineup_sum.get("no_booster_avg_error") is not None:
                 print(f"  Booster Compounding: Boosted Avg Error {lineup_sum['booster_avg_error']:.2f} RRS vs Unboosted {lineup_sum['no_booster_avg_error']:.2f} RRS")
             print("-" * 68)
+
+    metrics = {
+        "baseline": {
+            target: {"mae": mae_base[target], "rmse": rmse_base[target], "spearman": sp_base[target]}
+            for target in targets
+        },
+        "ridge": {
+            target: {"mae": mae_ridge[target], "rmse": rmse_ridge[target], "spearman": sp_ridge[target]}
+            for target in targets
+        },
+        "glm": {
+            target: {"mae": mae_glm[target], "rmse": rmse_glm[target], "spearman": sp_glm[target]}
+            for target in targets
+        },
+    }
+
+    return {
+        "players": tested_players,
+        "test_games": len(actuals["goals"]),
+        "point_in_time": point_in_time,
+        "metrics": metrics,
+        "lineup_validation": lineup_validation,
+    }

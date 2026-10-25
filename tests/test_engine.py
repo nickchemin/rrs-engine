@@ -2015,7 +2015,7 @@ class TestReviewFixes(unittest.TestCase):
             evaluate_model(self.db, standings={"CGY": {"defense_factor": 0.5}}, min_games=30, point_in_time=True)
         out = buf.getvalue()
         self.assertIn("Validation Results", out)
-        self.assertIn("Strict point-in-time (no look-ahead leakage)", out)
+        self.assertIn("Opponent standings neutralized", out)
         self.assertIn("Goals (MAE):", out)
 
     # 12. Lineup-level validation summary and compounded multiplier metrics
@@ -2444,12 +2444,16 @@ class TestPhase1FeatureEngineering(unittest.TestCase):
 
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            evaluate_model(self.db, standings={"CHI": {"defense_factor": 1.0}}, min_games=30, point_in_time=True)
+            results = evaluate_model(self.db, standings={"CHI": {"defense_factor": 1.0}}, min_games=30, point_in_time=True)
         out = buf.getvalue()
         self.assertIn("MODEL VALIDATION & BENCHMARK COMPARISON", out)
         self.assertIn("20-Game Baseline", out)
         self.assertIn("Classic (Ridge)", out)
         self.assertIn("New (Poisson GLM)", out)
+        self.assertEqual(results["players"], 1)
+        self.assertGreater(results["test_games"], 0)
+        self.assertIn("mae", results["metrics"]["glm"]["goals"])
+        self.assertIsNone(results["lineup_validation"])
         self.assertIn("Spearman (r_s)", out)
 
 
