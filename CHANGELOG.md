@@ -2,6 +2,28 @@
 
 All notable changes to the RRS Engine project are documented in this file.
 
+## [2.6.0] - 2026-10-26
+
+### Fixed
+- Lineup history preserves settled results and recorded app scores when a lineup is saved again.
+- Empty injury feeds and repeated game-log syncs no longer erase cached data.
+- Game logs and standings writes accept missing numeric values.
+- Booster entries for players outside the active slate are preserved.
+- HTTP retries raise after the final attempt and honor `Retry-After`.
+- Line scraping falls back to NHL time-on-ice data when deployment is missing.
+- Screenshot parsing works with cached players when the schedule is unavailable.
+- Fuzzy matching rejects candidates from another team or position group.
+- Fatigue and special-teams context is no longer counted twice in projections.
+
+### Added
+- Calibrated scoring weights are stored in the database and applied to projections.
+- Calibration reports an out-of-time holdout and requires at least 15 ground-truth samples before saving.
+- Backtest metrics are returned as structured data.
+
+### Changed
+- Projection and settlement score caps are aligned.
+- Removed emoji and non-English output from the CLI.
+
 ## [2.5.1] - 2026-10-20
 
 ### Fixed & Improved

@@ -500,7 +500,7 @@ class TestLineupOptimizer(unittest.TestCase):
         with patch("sys.stdout", buf):
             print_quant_banner(mode="Sync Roster & Boosters", target_date="2026-10-17")
         out = buf.getvalue()
-        self.assertIn("RRS ENGINE v2.5", out)
+        self.assertIn("RRS ENGINE v2.6", out)
         self.assertIn("Mode: Sync Roster & Boosters", out)
         self.assertIn("Date: 2026-10-17", out)
         self.assertIn("____", out)
