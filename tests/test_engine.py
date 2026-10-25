@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import shutil
@@ -24,6 +25,7 @@ from nhl_api import (
     nhl_today,
     current_season_start_year,
     compute_goalie_factor,
+    _has_deployment,
     TEAM_SLUG_MAP,
     USEasternTz
 )
@@ -2578,6 +2580,41 @@ class TestPhase3ScrapingAndFallback(unittest.TestCase):
         with patch.object(self.client.session, "get", mock_req), patch("time.sleep"):
             with self.assertRaises(requests.exceptions.ConnectionError):
                 self.client.request_with_retry("https://api-test.com/fail", max_retries=3, backoff_base=0.01)
+
+    def test_line_fallback_requires_deployment_data(self):
+        lines = TeamLines()
+        lines[("player one", "F")] = {"ev_line": None, "pp_unit": None}
+        self.assertFalse(_has_deployment(lines))
+
+        lines[("player two", "F")] = {"ev_line": "L1", "pp_unit": None}
+        self.assertTrue(_has_deployment(lines))
+
+    def test_dfo_lines_without_deployment_trigger_fallback(self):
+        payload = {
+            "props": {
+                "pageProps": {
+                    "combinations": {
+                        "players": [{
+                            "name": "Test Player",
+                            "positionIdentifier": "C",
+                            "groupIdentifier": "F",
+                            "categoryIdentifier": "even_strength",
+                        }]
+                    }
+                }
+            }
+        }
+        resp = MagicMock(status_code=200)
+        resp.text = f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
+        fallback_lines = TeamLines()
+        fallback_lines[("fallback player", "F")] = {"ev_line": "L1", "pp_unit": "PP1"}
+
+        with patch.object(self.client, "request_with_retry", return_value=resp), \
+                patch.object(self.client, "_fallback_team_lines_from_nhl_api", return_value=fallback_lines) as fallback:
+            lines = self.client.get_team_lines("EDM", force=True)
+
+        self.assertIs(lines, fallback_lines)
+        fallback.assert_called_once_with("EDM")
 
     def test_team_lines_dfo_failure_triggers_nhl_api_toi_fallback(self):
         dfo_resp = MagicMock(status_code=500)

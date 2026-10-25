@@ -18,6 +18,13 @@ from db import Database, season_from_date, TeamLines
 logger = logging.getLogger(__name__)
 
 
+def _has_deployment(lines: TeamLines) -> bool:
+    return any(
+        isinstance(entry, dict) and (entry.get("ev_line") or entry.get("pp_unit"))
+        for entry in lines.values()
+    )
+
+
 class USEasternTz(tzinfo):
     """Accurate US Eastern Time fallback with Daylight Saving Time (EDT/EST)."""
     def utcoffset(self, dt):
@@ -784,7 +791,7 @@ class NHLClient:
                     team_has_pp = any(v.get("pp_unit") for k, v in lines_data.items() if isinstance(v, dict))
                     lines_data._meta = {"has_pp": team_has_pp, "source": "dailyfaceoff"}
 
-                    if lines_data:
+                    if lines_data and _has_deployment(lines_data):
                         self.db.save_team_lines(team, lines_data)
                 else:
                     print(f"⚠️ Warning: Daily Faceoff page structure changed (no __NEXT_DATA__) for {team}")
@@ -793,9 +800,9 @@ class NHLClient:
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch lines for {team}: {e}")
 
-        # If Daily Faceoff scraping failed or returned 0 players, fallback automatically to NHL API TOI profiles!
-        if not lines_data:
-            print(f"🔄 Triggering automatic NHL API TOI-profile fallback for {team} line combinations...")
+        # Fall back to NHL API time-on-ice profiles when the scraped page has no usable deployment data.
+        if not _has_deployment(lines_data):
+            print(f"Daily Faceoff lines for {team} have no deployment data; using NHL API fallback.")
             lines_data = self._fallback_team_lines_from_nhl_api(team)
 
         return lines_data
